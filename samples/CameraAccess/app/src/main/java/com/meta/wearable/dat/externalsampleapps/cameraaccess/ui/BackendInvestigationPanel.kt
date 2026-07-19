@@ -24,6 +24,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -32,12 +33,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.BuildConfig
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceInput
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun BackendInvestigationPanel(
     modifier: Modifier = Modifier,
+    prefillLiveEvidence: InvestigationEvidenceInput? = null,
     viewModel: InvestigationSessionDebugViewModel =
         viewModel(
             factory =
@@ -47,6 +50,9 @@ internal fun BackendInvestigationPanel(
         ),
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+  LaunchedEffect(prefillLiveEvidence) {
+    prefillLiveEvidence?.let { viewModel.setEvidence(0, it) }
+  }
   val firstImagePicker =
       rememberLauncherForActivityResult(contract = GetContent()) { uri: Uri? ->
         val displayName = uri?.lastPathSegment ?: uri?.toString()?.substringAfterLast('/')
@@ -117,6 +123,11 @@ internal fun BackendInvestigationPanel(
             Text("Clear")
           }
         }
+        Text(
+            text = slot.evidence?.source?.displayLabel ?: "Source: Local picker",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
       }
 
       OutlinedTextField(

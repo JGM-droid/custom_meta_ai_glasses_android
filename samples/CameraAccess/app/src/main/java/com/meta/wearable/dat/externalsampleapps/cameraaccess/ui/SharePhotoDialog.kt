@@ -12,6 +12,7 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -30,7 +32,12 @@ import androidx.compose.ui.window.Dialog
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 
 @Composable
-fun SharePhotoDialog(photo: Bitmap, onDismiss: () -> Unit, onShare: (Bitmap) -> Unit) {
+fun SharePhotoDialog(
+  photo: Bitmap,
+  onDismiss: () -> Unit,
+  onShare: (Bitmap) -> Unit,
+  onContinueToInvestigation: (() -> Unit)? = null,
+) {
   Dialog(onDismissRequest = onDismiss) {
     Card(
         modifier = Modifier.fillMaxWidth(0.9f).wrapContentHeight(),
@@ -51,6 +58,13 @@ fun SharePhotoDialog(photo: Bitmap, onDismiss: () -> Unit, onShare: (Bitmap) -> 
 
         Button(onClick = { onShare(photo) }, modifier = Modifier.fillMaxWidth()) {
           Text(stringResource(R.string.share))
+        }
+        if (onContinueToInvestigation != null) {
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = onContinueToInvestigation) {
+              Text("Continue to investigation")
+            }
+          }
         }
       }
     }

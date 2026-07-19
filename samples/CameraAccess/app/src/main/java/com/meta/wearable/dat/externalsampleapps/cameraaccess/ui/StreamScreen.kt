@@ -18,6 +18,7 @@ import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,7 +26,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -35,15 +41,18 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StreamScreen(
+internal fun StreamScreen(
     wearablesViewModel: WearablesViewModel,
     modifier: Modifier = Modifier,
     streamViewModel: StreamViewModel =
@@ -54,10 +63,28 @@ fun StreamScreen(
                     wearablesViewModel = wearablesViewModel,
                 ),
         ),
+    investigationViewModel: InvestigationSessionDebugViewModel =
+        viewModel(
+            factory =
+                InvestigationSessionDebugViewModel.factory(
+                    (LocalActivity.current as ComponentActivity).application,
+                ),
+        ),
 ) {
   val streamUiState by streamViewModel.uiState.collectAsStateWithLifecycle()
+  val investigationSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+  val lifecycleOwner = LocalLifecycleOwner.current
+
+  DisposableEffect(lifecycleOwner, streamViewModel) {
+    val observer = createStreamLifecycleStopObserver { streamViewModel.stopStream() }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+  }
 
   LaunchedEffect(Unit) { streamViewModel.startStream() }
+  LaunchedEffect(streamUiState.capturedInvestigationEvidence) {
+    streamUiState.capturedInvestigationEvidence?.let { investigationViewModel.setEvidence(0, it) }
+  }
 
   Box(modifier = modifier.fillMaxSize()) {
     streamUiState.videoFrame?.let { videoFrame ->
@@ -79,28 +106,44 @@ fun StreamScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize().padding(all = 24.dp)) {
-      Row(
-          modifier =
-              Modifier.align(Alignment.BottomCenter)
-                  .navigationBarsPadding()
-                  .fillMaxWidth()
-                  .height(56.dp),
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-          verticalAlignment = Alignment.CenterVertically,
+      Column(
+          modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding(),
+          verticalArrangement = Arrangement.spacedBy(12.dp),
       ) {
-        SwitchButton(
-            label = stringResource(R.string.stop_stream_button_title),
-            onClick = {
-              streamViewModel.stopStream()
-              wearablesViewModel.navigateToDeviceSelection()
-            },
-            isDestructive = true,
-            modifier = Modifier.weight(1f),
-        )
+        streamUiState.captureErrorMessage?.let { message ->
+          Text(text = message)
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+          SwitchButton(
+              label = stringResource(R.string.stop_stream_button_title),
+              onClick = {
+                streamViewModel.stopStream()
+                wearablesViewModel.navigateToDeviceSelection()
+              },
+              isDestructive = true,
+              modifier = Modifier.weight(1f),
+          )
 
-        // Photo capture button
-        CaptureButton(
-            onClick = { streamViewModel.capturePhoto() },
+          // Photo capture button
+          CaptureButton(
+              onClick = { streamViewModel.capturePhoto() },
+          )
+        }
+      }
+    }
+
+    if (streamUiState.isInvestigationPanelVisible) {
+      ModalBottomSheet(
+          onDismissRequest = { streamViewModel.hideInvestigationPanel() },
+          sheetState = investigationSheetState,
+      ) {
+        BackendInvestigationPanel(
+            modifier = Modifier.fillMaxWidth(),
+            prefillLiveEvidence = streamUiState.capturedInvestigationEvidence,
         )
       }
     }
@@ -114,6 +157,10 @@ fun StreamScreen(
           onShare = { bitmap ->
             streamViewModel.sharePhoto(bitmap)
             streamViewModel.hideShareDialog()
+          },
+          onContinueToInvestigation = {
+            streamViewModel.hideShareDialog()
+            streamViewModel.showInvestigationPanel()
           },
       )
     }

@@ -6,7 +6,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.BuildConfig
-import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +20,7 @@ internal data class InvestigationImageSlotUiState(
     val slotIndex: Int,
     val uriString: String? = null,
     val displayName: String? = null,
+  val evidence: InvestigationEvidenceInput? = null,
 )
 
 internal data class InvestigationSessionDebugUiState(
@@ -76,7 +76,27 @@ internal class InvestigationSessionDebugViewModel(
       state.copy(
           images = state.images.map { slot ->
             if (slot.slotIndex == slotIndex) {
-              slot.copy(uriString = uriString, displayName = displayName)
+              slot.copy(uriString = uriString, displayName = displayName, evidence = null)
+            } else {
+              slot
+            }
+          },
+          backendErrorCategory = null,
+          statusMessage = null,
+      )
+    }
+  }
+
+  fun setEvidence(slotIndex: Int, evidence: InvestigationEvidenceInput) {
+    _uiState.update { state ->
+      state.copy(
+          images = state.images.map { slot ->
+            if (slot.slotIndex == slotIndex) {
+              slot.copy(
+                  uriString = null,
+                  displayName = evidence.filename,
+                  evidence = evidence,
+              )
             } else {
               slot
             }
@@ -145,12 +165,15 @@ internal class InvestigationSessionDebugViewModel(
   }
 
   fun submitInvestigation() {
-    val draft = buildDraft() ?: run {
-      _uiState.update { it.copy(statusMessage = "Select 1 to 3 images before submitting.") }
-      return
-    }
     if (activeJob?.isActive == true) return
     activeJob = viewModelScope.launch {
+      val draft =
+          withContext(Dispatchers.IO) {
+            buildDraft()
+          } ?: run {
+            _uiState.update { it.copy(statusMessage = "Select 1 to 3 images before submitting.") }
+            return@launch
+          }
       _uiState.update {
         it.copy(
             isRunning = true,
@@ -246,6 +269,8 @@ internal class InvestigationSessionDebugViewModel(
   private fun buildDraft(): InvestigationSubmissionDraft? {
     val selectedEvidence =
         _uiState.value.images.mapIndexedNotNull { index, slot ->
+          slot.evidence?.let { return@mapIndexedNotNull it.copy(slotIndex = index) }
+
           val uriText = slot.uriString ?: return@mapIndexedNotNull null
           val uri = Uri.parse(uriText)
           val input = readUriBytes(uri) ?: return@mapIndexedNotNull null
@@ -254,6 +279,7 @@ internal class InvestigationSessionDebugViewModel(
               filename = slot.displayName ?: uri.lastPathSegment ?: "capture_$index.jpg",
               mimeType = detectMimeType(uri) ?: "image/jpeg",
               bytes = input,
+              source = InvestigationEvidenceSource.LOCAL_PICKER,
           )
         }
 

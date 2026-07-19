@@ -7,6 +7,15 @@ import kotlinx.coroutines.sync.Mutex
 import java.time.Duration
 import java.time.Instant
 
+internal enum class InvestigationEvidenceSource(
+  val wireValue: String,
+  val displayLabel: String,
+) {
+  LIVE_GLASSES("live_glasses", "Live glasses"),
+  MOCK_DEVICE("mock_device", "Mock device"),
+  LOCAL_PICKER("local_picker", "Local picker");
+}
+
 internal enum class InvestigationClientState {
   IDLE,
   PREPARING,
@@ -35,6 +44,7 @@ internal data class InvestigationEvidenceInput(
     val filename: String,
     val mimeType: String,
     val bytes: ByteArray,
+  val source: InvestigationEvidenceSource = InvestigationEvidenceSource.LOCAL_PICKER,
 )
 
 internal data class InvestigationSubmissionDraft(
@@ -390,6 +400,11 @@ internal class InvestigationSessionRepository(
         source = "android",
         clientTimestampUtc = Instant.now(),
         normalizedText = explanationText,
+      metadata = mapOf(
+        "capture_source" to item.source.wireValue,
+        "capture_source_label" to item.source.displayLabel,
+        "capture_slot_index" to item.slotIndex,
+      ),
         filename = item.filename,
         mimeType = item.mimeType,
     )

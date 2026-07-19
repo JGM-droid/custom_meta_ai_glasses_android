@@ -43,20 +43,27 @@ import com.meta.wearable.dat.core.selectors.DeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
 import com.meta.wearable.dat.core.session.DeviceSessionState
 import com.meta.wearable.dat.core.types.DeviceSessionError
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceInput
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceSource
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.bitmapToInvestigationEvidence
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.heicBytesToInvestigationEvidence
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.liveCaptureFilename
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @SuppressLint("AutoCloseableUse")
-class StreamViewModel(
+internal class StreamViewModel(
     application: Application,
     private val wearablesViewModel: WearablesViewModel,
 ) : AndroidViewModel(application) {
@@ -80,19 +87,31 @@ class StreamViewModel(
   private var sessionStateJob: Job? = null
   private var stream: Stream? = null
   private var previousDeviceSessionState: DeviceSessionState? = null
+  private val lifecycleController = StreamSessionLifecycleController()
 
   // Presentation queue for buffering frames after color conversion
   private var presentationQueue: PresentationQueue? = null
 
   fun startStream() {
-    videoJob?.cancel()
-    stateJob?.cancel()
-    errorJob?.cancel()
-    sessionErrorJob?.cancel()
-    sessionStateJob?.cancel()
-    presentationQueue?.stop()
-    presentationQueue = null
-    previousDeviceSessionState = null
+    val hasActivePipeline =
+        (sessionStateJob?.isActive == true) ||
+            (videoJob?.isActive == true) ||
+            (stateJob?.isActive == true) ||
+            (errorJob?.isActive == true) ||
+            stream != null
+
+    val (decision, startToken) =
+        lifecycleController.requestStart(
+            hasSessionReference = session != null,
+            hasActivePipeline = hasActivePipeline,
+        )
+
+    if (decision == StreamSessionLifecycleController.StartDecision.IGNORE || startToken == null) {
+      Log.d(TAG, "Ignoring startStream() because stream/session is already managed")
+      return
+    }
+
+    resetUiForNewStart()
 
     // Initialize presentation queue - frames are presented based on timestamp, not arrival time
     // Uses IntArray pooling for efficiency - cheaper than Bitmap.copy()
@@ -112,27 +131,38 @@ class StreamViewModel(
         )
     presentationQueue = queue
     queue.start()
-    if (session == null) {
+
+    if (decision == StreamSessionLifecycleController.StartDecision.CREATE_SESSION) {
       previousDeviceSessionState = null
       Wearables.createSession(deviceSelector)
           .onSuccess { createdSession ->
+            if (!lifecycleController.shouldAcceptCreateResult(startToken)) {
+              createdSession.stop()
+              return@onSuccess
+            }
             session = createdSession
+            lifecycleController.onSessionCreated(startToken)
             sessionErrorJob = viewModelScope.launch {
               createdSession.errors.collect { error -> handleSessionError(error) }
             }
             session?.start()
+            startStreamInternal(startToken)
           }
           .onFailure { error, _ ->
             Log.e(TAG, "Failed to create session: ${error.description}")
+            lifecycleController.onCreateFailed(startToken)
             handleSessionError(error)
           }
-      if (session == null) return
+      return
     }
-    startStreamInternal()
+
+    previousDeviceSessionState = null
+    startStreamInternal(startToken)
   }
 
-  private fun startStreamInternal() {
+  private fun startStreamInternal(startToken: Long) {
     Log.d(TAG, "startStreamInternal() - collecting session state")
+    lifecycleController.onStartAttached(startToken)
     sessionStateJob = viewModelScope.launch {
       session?.state?.collect { currentState ->
         val prevState = previousDeviceSessionState
@@ -208,6 +238,18 @@ class StreamViewModel(
   }
 
   fun stopStream() {
+    if (
+        !lifecycleController.requestStop(
+            hasSessionReference = session != null,
+            hasStreamReference = stream != null,
+        )
+    ) {
+      Log.d(TAG, "Ignoring stopStream() because no stream/session is active")
+      return
+    }
+
+    var teardownFailure: Throwable? = null
+
     videoJob?.cancel()
     videoJob = null
     stateJob?.cancel()
@@ -221,10 +263,28 @@ class StreamViewModel(
     presentationQueue?.stop()
     presentationQueue = null
     _uiState.update { INITIAL_STATE }
-    stream?.stop()
+    previousDeviceSessionState = null
+    try {
+      stream?.stop()
+    } catch (t: Throwable) {
+      Log.e(TAG, "Failed to stop stream cleanly", t)
+      teardownFailure = t
+    }
     stream = null
-    session?.stop()
+    try {
+      session?.stop()
+    } catch (t: Throwable) {
+      Log.e(TAG, "Failed to stop session cleanly", t)
+      teardownFailure = teardownFailure ?: t
+    }
     session = null
+    lifecycleController.onStopCompleted()
+
+    teardownFailure?.let {
+      wearablesViewModel.setRecentError(
+          "Failed to fully release the camera session. Try starting the stream again."
+      )
+    }
   }
 
   private fun handleSessionError(error: DeviceSessionError) {
@@ -250,31 +310,56 @@ class StreamViewModel(
   fun capturePhoto() {
     if (uiState.value.isCapturing) {
       Log.d(TAG, "Photo capture already in progress, ignoring request")
+      _uiState.update { it.copy(captureErrorMessage = "Capture already in progress.") }
       return
     }
 
-    if (uiState.value.streamState == StreamState.STREAMING) {
-      Log.d(TAG, "Starting photo capture")
-      _uiState.update { it.copy(isCapturing = true) }
-
-      viewModelScope.launch {
-        stream
-            ?.capturePhoto()
-            ?.onSuccess { photoData ->
-              Log.d(TAG, "Photo capture successful")
-              handlePhotoData(photoData)
-              _uiState.update { it.copy(isCapturing = false) }
-            }
-            ?.onFailure { error, _ ->
-              Log.e(TAG, "Photo capture failed: ${error.description}")
-              _uiState.update { it.copy(isCapturing = false) }
-            }
-      }
-    } else {
+    if (uiState.value.streamState != StreamState.STREAMING || stream == null) {
       Log.w(
           TAG,
           "Cannot capture photo: stream not active (state=${uiState.value.streamState})",
       )
+      _uiState.update { it.copy(captureErrorMessage = "Start the live stream before capturing a still image.") }
+      return
+    }
+
+    Log.d(TAG, "Starting photo capture")
+    _uiState.update { it.copy(isCapturing = true, captureErrorMessage = null) }
+
+    viewModelScope.launch {
+      stream
+          ?.capturePhoto()
+          ?.onSuccess { photoData ->
+            Log.d(TAG, "Photo capture successful")
+            val normalized = withContext(Dispatchers.Default) { normalizeCapturedPhoto(photoData) }
+            _uiState.update {
+              it.copy(
+                  isCapturing = false,
+                  capturedPhoto = normalized.previewBitmap,
+                  capturedInvestigationEvidence = normalized.investigationEvidence,
+                  isShareDialogVisible = true,
+                  isInvestigationPanelVisible = false,
+                  captureErrorMessage = null,
+              )
+            }
+          }
+          ?.onFailure { error, _ ->
+            Log.e(TAG, "Photo capture failed: ${error.description}")
+            _uiState.update {
+              it.copy(
+                  isCapturing = false,
+                  captureErrorMessage = error.getLocalizedDescription(getApplication()),
+              )
+            }
+          }
+          ?: run {
+            _uiState.update {
+              it.copy(
+                  isCapturing = false,
+                  captureErrorMessage = "No active stream is available for capture.",
+              )
+            }
+          }
     }
   }
 
@@ -284,6 +369,14 @@ class StreamViewModel(
 
   fun hideShareDialog() {
     _uiState.update { it.copy(isShareDialogVisible = false) }
+  }
+
+  fun showInvestigationPanel() {
+    _uiState.update { it.copy(isInvestigationPanelVisible = true) }
+  }
+
+  fun hideInvestigationPanel() {
+    _uiState.update { it.copy(isInvestigationPanelVisible = false) }
   }
 
   fun sharePhoto(bitmap: Bitmap) {
@@ -330,21 +423,43 @@ class StreamViewModel(
     }
   }
 
-  private fun handlePhotoData(photo: PhotoData) {
-    val capturedPhoto =
-        when (photo) {
-          is PhotoData.Bitmap -> photo.bitmap
-          is PhotoData.HEIC -> {
-            val byteArray = ByteArray(photo.data.remaining())
-            photo.data.get(byteArray)
+  private data class NormalizedCapture(
+      val previewBitmap: Bitmap,
+      val investigationEvidence: InvestigationEvidenceInput,
+  )
 
-            // Extract EXIF transformation matrix and apply to bitmap
-            val exifInfo = getExifInfo(byteArray)
-            val transform = getTransform(exifInfo)
-            decodeHeic(byteArray, transform)
-          }
-        }
-    _uiState.update { it.copy(capturedPhoto = capturedPhoto, isShareDialogVisible = true) }
+  private fun normalizeCapturedPhoto(photo: PhotoData): NormalizedCapture {
+    return when (photo) {
+      is PhotoData.Bitmap -> {
+        val previewBitmap = photo.bitmap
+        val evidence =
+            bitmapToInvestigationEvidence(
+                bitmap = previewBitmap,
+                slotIndex = 0,
+                filename = liveCaptureFilename(slotIndex = 0, extension = "png"),
+                source = InvestigationEvidenceSource.LIVE_GLASSES,
+            )
+        NormalizedCapture(previewBitmap = previewBitmap, investigationEvidence = evidence)
+      }
+
+      is PhotoData.HEIC -> {
+        val byteArray = ByteArray(photo.data.remaining())
+        photo.data.get(byteArray)
+
+        // Extract EXIF transformation matrix and apply to bitmap
+        val exifInfo = getExifInfo(byteArray)
+        val transform = getTransform(exifInfo)
+        val previewBitmap = decodeHeic(byteArray, transform)
+        val evidence =
+            heicBytesToInvestigationEvidence(
+                heicBytes = byteArray,
+                slotIndex = 0,
+                filename = liveCaptureFilename(slotIndex = 0, extension = "heic"),
+                source = InvestigationEvidenceSource.LIVE_GLASSES,
+            )
+        NormalizedCapture(previewBitmap = previewBitmap, investigationEvidence = evidence)
+      }
+    }
   }
 
   // HEIC Decoding with EXIF transformation
@@ -427,8 +542,29 @@ class StreamViewModel(
   override fun onCleared() {
     super.onCleared()
     stopStream()
-    session?.stop()
-    session = null
+  }
+
+  private fun resetUiForNewStart() {
+    videoJob?.cancel()
+    stateJob?.cancel()
+    errorJob?.cancel()
+    sessionErrorJob?.cancel()
+    sessionStateJob?.cancel()
+    presentationQueue?.stop()
+    presentationQueue = null
+    previousDeviceSessionState = null
+    _uiState.update {
+      it.copy(
+          videoFrame = null,
+          videoFrameCount = 0,
+          capturedPhoto = null,
+          capturedInvestigationEvidence = null,
+          isShareDialogVisible = false,
+          isInvestigationPanelVisible = false,
+          isCapturing = false,
+          captureErrorMessage = null,
+      )
+    }
   }
 
   class Factory(

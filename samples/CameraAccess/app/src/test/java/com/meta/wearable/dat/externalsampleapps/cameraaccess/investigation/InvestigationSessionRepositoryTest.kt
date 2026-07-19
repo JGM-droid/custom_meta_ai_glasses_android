@@ -307,6 +307,22 @@ class InvestigationSessionRepositoryTest {
   }
 
   @Test
+  fun liveGlassesCaptureMetadataIsPreservedOnUpload() = runBlocking {
+    val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
+    val repository = InvestigationSessionRepository(api = api)
+
+    repository.submitInvestigation(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("live.jpg", source = InvestigationEvidenceSource.LIVE_GLASSES)),
+            explanationText = "Brake noise",
+        ),
+    )
+
+    assertEquals("live_glasses", api.uploadedEvidenceMetadata.single()["capture_source"])
+    assertEquals(0, api.uploadedEvidenceMetadata.single()["capture_slot_index"])
+  }
+
+  @Test
   fun defaultBackendUrlIsEmulator8001() {
     assertEquals("http://10.0.2.2:8001", InvestigationBackendConfig.resolveBaseUrl(""))
   }
@@ -332,12 +348,16 @@ class InvestigationSessionRepositoryTest {
     assertFalse(failed.error.message.contains("capability gap", ignoreCase = true))
   }
 
-  private fun image(name: String): InvestigationEvidenceInput {
+  private fun image(
+      name: String,
+      source: InvestigationEvidenceSource = InvestigationEvidenceSource.LOCAL_PICKER,
+  ): InvestigationEvidenceInput {
     return InvestigationEvidenceInput(
         slotIndex = 0,
         filename = name,
         mimeType = "image/jpeg",
         bytes = byteArrayOf(1, 2, 3),
+        source = source,
     )
   }
 }
@@ -360,6 +380,7 @@ private class FakeInvestigationSessionApi(
     private set
   val uploadedImageFilenames = mutableListOf<String>()
   val uploadedExplanationTexts = mutableListOf<String?>()
+  val uploadedEvidenceMetadata = mutableListOf<Map<String, Any?>>()
   val callTrace = mutableListOf<String>()
 
   override suspend fun createSession(request: BackendSessionCreateRequestDto): BackendSessionDto {
@@ -406,6 +427,7 @@ private class FakeInvestigationSessionApi(
     callTrace += "upload:${payload.filename}"
     uploadedImageFilenames += payload.filename
     uploadedExplanationTexts += request.normalizedText
+    uploadedEvidenceMetadata += request.metadata ?: emptyMap()
     return evidence(payload.filename)
   }
 
