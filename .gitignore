@@ -1,0 +1,28 @@
+# Repository-level editor and OS artifacts
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local environment and machine-specific config
+.env
+.env.*
+**/local.properties
+
+# Local generated/copied backend state (not Android source)
+code/prototype_v1/results/
+
+# Sensitive key/cert artifacts (preserve required sample debug keystore)
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+*.crt
+*.cer
+!samples/CameraAccess/app/sample.keystore
+
+# Common credential export filenames
+*service*account*.json
+*credentials*.json
