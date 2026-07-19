@@ -144,6 +144,8 @@ fun MockDeviceKitScreen(
         MockDeviceCard(deviceInfo = deviceInfo, viewModel = viewModel)
       }
     }
+
+    BackendInvestigationPanel(modifier = Modifier.fillMaxWidth())
   }
 }
 

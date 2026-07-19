@@ -6,6 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -13,6 +14,14 @@ plugins {
   alias(libs.plugins.jetbrains.kotlin.android)
   alias(libs.plugins.compose.compiler)
 }
+
+val localProperties =
+    Properties().apply {
+      val localPropertiesFile = rootProject.file("local.properties")
+      if (localPropertiesFile.exists()) {
+        localPropertiesFile.inputStream().use(::load)
+      }
+    }
 
 android {
   namespace = "com.meta.wearable.dat.externalsampleapps.cameraaccess"
@@ -34,6 +43,17 @@ android {
     // in Wearables Developer Center
     manifestPlaceholders["mwdat_application_id"] = ""
     manifestPlaceholders["mwdat_client_token"] = ""
+    val investigationBackendBaseUrl =
+      providers.gradleProperty("investigation_backend_base_url").orNull
+        ?: localProperties.getProperty(
+          "investigation_backend_base_url",
+          "http://10.0.2.2:8001",
+        )
+    buildConfigField(
+      "String",
+      "INVESTIGATION_BACKEND_BASE_URL",
+      "\"$investigationBackendBaseUrl\"",
+    )
   }
 
   buildTypes {
@@ -75,4 +95,6 @@ dependencies {
   androidTestImplementation(libs.androidx.ui.test.junit4)
   androidTestImplementation(libs.androidx.test.uiautomator)
   androidTestImplementation(libs.androidx.test.rules)
+  testImplementation(libs.junit)
+  testImplementation(libs.org.json)
 }
