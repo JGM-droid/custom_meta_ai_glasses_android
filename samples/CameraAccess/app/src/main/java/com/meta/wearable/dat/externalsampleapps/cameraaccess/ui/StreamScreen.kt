@@ -72,6 +72,7 @@ internal fun StreamScreen(
         ),
 ) {
   val streamUiState by streamViewModel.uiState.collectAsStateWithLifecycle()
+  val investigationUiState by investigationViewModel.uiState.collectAsStateWithLifecycle()
   val investigationSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -82,6 +83,22 @@ internal fun StreamScreen(
   }
 
   LaunchedEffect(Unit) { streamViewModel.startStream() }
+  LaunchedEffect(
+      investigationUiState.activeCaptureCount,
+      investigationUiState.hasCaptureCapacity,
+      streamUiState.isInvestigationPanelVisible,
+      streamUiState.shouldReturnToInvestigationAfterCapture,
+  ) {
+    val investigationActive =
+        streamUiState.isInvestigationPanelVisible ||
+            streamUiState.shouldReturnToInvestigationAfterCapture ||
+            investigationUiState.activeCaptureCount > 0
+    streamViewModel.updateDisplayCaptureControl(
+        investigationActive = investigationActive,
+        activeCaptureCount = investigationUiState.activeCaptureCount,
+        hasCaptureCapacity = investigationUiState.hasCaptureCapacity,
+    )
+  }
 
   Box(modifier = modifier.fillMaxSize()) {
     streamUiState.videoFrame?.let { videoFrame ->

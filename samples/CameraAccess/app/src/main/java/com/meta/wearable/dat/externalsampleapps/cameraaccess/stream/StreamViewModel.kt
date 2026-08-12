@@ -43,6 +43,13 @@ import com.meta.wearable.dat.core.selectors.DeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
 import com.meta.wearable.dat.core.session.DeviceSessionState
 import com.meta.wearable.dat.core.types.DeviceSessionError
+import com.meta.wearable.dat.display.Display
+import com.meta.wearable.dat.display.addDisplay
+import com.meta.wearable.dat.display.removeDisplay
+import com.meta.wearable.dat.display.types.DisplayState
+import com.meta.wearable.dat.display.views.ButtonStyle
+import com.meta.wearable.dat.display.views.FlexBoxBackground
+import com.meta.wearable.dat.display.views.TextStyle
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceInput
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceSource
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.bitmapToInvestigationEvidence
@@ -86,8 +93,15 @@ internal class StreamViewModel(
   private var sessionErrorJob: Job? = null
   private var sessionStateJob: Job? = null
   private var stream: Stream? = null
+  private var display: Display? = null
+  private var displayStateJob: Job? = null
   private var previousDeviceSessionState: DeviceSessionState? = null
   private val lifecycleController = StreamSessionLifecycleController()
+  private var investigationActiveForDisplay: Boolean = false
+  private var activeCaptureCountForDisplay: Int = 0
+  private var hasCaptureCapacityForDisplay: Boolean = true
+  private var displayState: DisplayState? = null
+  private var lastDisplayCaptureModel: InvestigationDisplayCaptureModel? = null
 
   // Presentation queue for buffering frames after color conversion
   private var presentationQueue: PresentationQueue? = null
@@ -224,6 +238,7 @@ internal class StreamViewModel(
                   }
                 }
                 stream?.start()
+                attachDisplayIfAvailable()
               }
               ?.onFailure { error, _ ->
                 Log.e(TAG, "Failed to add stream to session: ${error.description}")
@@ -260,10 +275,21 @@ internal class StreamViewModel(
     sessionErrorJob = null
     sessionStateJob?.cancel()
     sessionStateJob = null
+    displayStateJob?.cancel()
+    displayStateJob = null
     presentationQueue?.stop()
     presentationQueue = null
     _uiState.update { INITIAL_STATE }
     previousDeviceSessionState = null
+    try {
+      session?.removeDisplay()
+    } catch (t: Throwable) {
+      Log.w(TAG, "Failed to detach display cleanly", t)
+    }
+    display = null
+    displayState = null
+    lastDisplayCaptureModel = null
+
     try {
       stream?.stop()
     } catch (t: Throwable) {
@@ -363,6 +389,27 @@ internal class StreamViewModel(
             }
           }
     }
+  }
+
+  fun updateDisplayCaptureControl(
+      investigationActive: Boolean,
+      activeCaptureCount: Int,
+      hasCaptureCapacity: Boolean,
+  ) {
+    investigationActiveForDisplay = investigationActive
+    activeCaptureCountForDisplay = activeCaptureCount
+    hasCaptureCapacityForDisplay = hasCaptureCapacity
+
+    viewModelScope.launch { renderDisplayCaptureControlIfNeeded() }
+  }
+
+  fun onDisplayCaptureAction() {
+    if (!hasCaptureCapacityForDisplay) {
+      return
+    }
+
+    prepareForAdditionalInvestigationCapture()
+    capturePhoto()
   }
 
   fun showShareDialog() {
@@ -561,12 +608,86 @@ internal class StreamViewModel(
     stopStream()
   }
 
+  private fun attachDisplayIfAvailable() {
+    if (display != null) {
+      return
+    }
+
+    session
+        ?.addDisplay()
+        ?.onSuccess { addedDisplay ->
+          display = addedDisplay
+          displayStateJob?.cancel()
+          displayStateJob =
+              viewModelScope.launch {
+                addedDisplay.state.collect { state ->
+                  displayState = state
+                  if (state == DisplayState.STARTED) {
+                    renderDisplayCaptureControlIfNeeded()
+                  }
+                }
+              }
+        }
+        ?.onFailure { error, _ ->
+          Log.d(TAG, "Display capability unavailable for this session: ${error.description}")
+        }
+  }
+
+  private suspend fun renderDisplayCaptureControlIfNeeded() {
+    val currentDisplay = display ?: return
+    if (displayState != DisplayState.STARTED) {
+      return
+    }
+
+    val model =
+        InvestigationDisplayCaptureModelFactory.create(
+            investigationActive = investigationActiveForDisplay,
+            activeCaptureCount = activeCaptureCountForDisplay,
+            hasCaptureCapacity = hasCaptureCapacityForDisplay,
+        )
+
+    if (model == lastDisplayCaptureModel) {
+      return
+    }
+
+    lastDisplayCaptureModel = model
+    if (model == null) {
+      return
+    }
+
+    currentDisplay
+        .sendContent {
+          flexBox(gap = 12, padding = 24, background = FlexBoxBackground.CARD) {
+            text("Investigation", style = TextStyle.HEADING)
+            text(model.statusText, style = TextStyle.BODY)
+            if (model.showCaptureAction) {
+              button(
+                  label = "Capture",
+                  style = ButtonStyle.PRIMARY,
+                  onClick = { onDisplayCaptureAction() },
+              )
+            }
+          }
+        }
+        .onFailure { error, _ ->
+          Log.d(TAG, "Display content update failed: ${error.description}")
+        }
+  }
+
   private fun resetUiForNewStart() {
     videoJob?.cancel()
     stateJob?.cancel()
     errorJob?.cancel()
     sessionErrorJob?.cancel()
     sessionStateJob?.cancel()
+    displayStateJob?.cancel()
+    displayStateJob = null
+    display = null
+    displayState = null
+    lastDisplayCaptureModel = null
+    investigationActiveForDisplay = false
+    activeCaptureCountForDisplay = 0
+    hasCaptureCapacityForDisplay = true
     presentationQueue?.stop()
     presentationQueue = null
     previousDeviceSessionState = null
