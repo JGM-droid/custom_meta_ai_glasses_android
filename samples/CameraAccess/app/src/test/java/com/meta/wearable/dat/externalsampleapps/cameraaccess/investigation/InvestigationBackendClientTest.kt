@@ -12,8 +12,24 @@ import org.junit.Test
 
 class InvestigationBackendClientTest {
   @Test
+  fun createSessionParsesCanonicalBackendResponse() {
+    val recorder = RequestRecorder(createSessionResponseBody())
+    val api = HttpUrlInvestigationSessionApi(
+        baseUrl = "http://10.0.2.2:8001",
+        connectionFactory = { url -> recorder.newConnection(url) },
+    )
+
+    val session = runBlockingTest { api.createSession(BackendSessionCreateRequestDto(clientMetadata = mapOf("source" to "cameraaccess_debug"))) }
+
+    assertEquals("POST", recorder.connection.requestMethod)
+    assertEquals("/investigation-sessions", recorder.connection.url.path)
+    assertEquals("123e4567-e89b-12d3-a456-426614174000", session.sessionId)
+    assertEquals(BackendSessionStatus.CREATED, session.status)
+  }
+
+  @Test
   fun analyzeEndpointPathIsCanonicalSessionAnalyzeRoute() {
-    val recorder = RequestRecorder()
+    val recorder = RequestRecorder(analyzeResponseBody())
     val api = HttpUrlInvestigationSessionApi(
         baseUrl = "http://10.0.2.2:8001",
         connectionFactory = { url -> recorder.newConnection(url) },
@@ -33,7 +49,7 @@ class InvestigationBackendClientTest {
 
   @Test
   fun analyzeRequestBodyUsesExpectedRevisionField() {
-    val recorder = RequestRecorder()
+    val recorder = RequestRecorder(analyzeResponseBody())
     val api = HttpUrlInvestigationSessionApi(
         baseUrl = "http://10.0.2.2:8001",
         connectionFactory = { url -> recorder.newConnection(url) },
@@ -52,16 +68,16 @@ class InvestigationBackendClientTest {
   }
 }
 
-private class RequestRecorder {
+private class RequestRecorder(private val responseBody: String) {
   lateinit var connection: RecordingConnection
 
   fun newConnection(url: URL): HttpURLConnection {
-    connection = RecordingConnection(url)
+    connection = RecordingConnection(url, responseBody)
     return connection
   }
 }
 
-private class RecordingConnection(url: URL) : HttpURLConnection(url) {
+private class RecordingConnection(url: URL, private val responseBody: String) : HttpURLConnection(url) {
   val output = ByteArrayOutputStream()
   val customHeaders = linkedMapOf<String, String>()
 
@@ -74,21 +90,7 @@ private class RecordingConnection(url: URL) : HttpURLConnection(url) {
   override fun getOutputStream(): ByteArrayOutputStream = output
 
   override fun getInputStream(): InputStream {
-    val body =
-        """
-        {
-          "session_id":"123e4567-e89b-12d3-a456-426614174000",
-          "investigation_id":null,
-          "status":"analyzing",
-          "accepted":true,
-          "result_available":false,
-          "compact_result":null,
-          "retryable":true,
-          "error":null,
-          "poll_url":"/investigation-sessions/123e4567-e89b-12d3-a456-426614174000/poll"
-        }
-        """.trimIndent()
-    return ByteArrayInputStream(body.toByteArray(StandardCharsets.UTF_8))
+    return ByteArrayInputStream(responseBody.toByteArray(StandardCharsets.UTF_8))
   }
 
   override fun getResponseCode(): Int = 200
@@ -100,6 +102,43 @@ private class RecordingConnection(url: URL) : HttpURLConnection(url) {
   override fun connect() {}
 }
 
-private fun runBlockingTest(block: suspend () -> Unit) {
-  kotlinx.coroutines.runBlocking { block() }
+private fun analyzeResponseBody(): String {
+  return """
+      {
+        "session_id":"123e4567-e89b-12d3-a456-426614174000",
+        "investigation_id":null,
+        "status":"analyzing",
+        "accepted":true,
+        "result_available":false,
+        "compact_result":null,
+        "retryable":true,
+        "error":null,
+        "poll_url":"/investigation-sessions/123e4567-e89b-12d3-a456-426614174000/poll"
+      }
+      """.trimIndent()
+}
+
+private fun createSessionResponseBody(): String {
+  return """
+      {
+        "schema_version":"2.0",
+        "session_id":"123e4567-e89b-12d3-a456-426614174000",
+        "status":"created",
+        "revision":0,
+        "created_at_utc":"2026-07-18T10:00:00Z",
+        "updated_at_utc":"2026-07-18T10:00:01Z",
+        "paused_at_utc":null,
+        "cancelled_at_utc":null,
+        "client_metadata":{"source":"cameraaccess_debug"},
+        "current_analysis_attempt_id":null,
+        "active_analysis_attempt_id":null,
+        "latest_analysis_attempt_id":null,
+        "completed_result_id":null,
+        "last_error":null
+      }
+      """.trimIndent()
+}
+
+private fun <T> runBlockingTest(block: suspend () -> T): T {
+  return kotlinx.coroutines.runBlocking { block() }
 }

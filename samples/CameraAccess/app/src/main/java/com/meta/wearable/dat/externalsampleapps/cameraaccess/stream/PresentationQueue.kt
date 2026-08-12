@@ -186,17 +186,20 @@ internal class PresentationQueue(
             presentationTimeUs = presentationTimeUs,
         )
 
-    val dropped: PresentationFrame?
+    var droppedIncoming = false
     synchronized(queueLock) {
-      // Check queue capacity and drop oldest if full
-      dropped = if (frameQueue.size >= maxQueueSize) frameQueue.poll() else null
-      frameQueue.offer(frame)
+      // Keep the earliest frame in the queue. Dropping the oldest frame can starve presentation
+      // because the "next" frame keeps moving into the future under sustained load.
+      if (frameQueue.size >= maxQueueSize) {
+        droppedIncoming = true
+      } else {
+        frameQueue.offer(frame)
+      }
     }
 
-    // Recycle outside lock
-    if (dropped != null) {
-      dropped.bitmap.recycle()
-      Log.d(TAG, "Queue full, dropped frame ts=${dropped.presentationTimeUs}")
+    if (droppedIncoming) {
+      frame.bitmap.recycle()
+      Log.d(TAG, "Queue full, dropped incoming frame ts=${frame.presentationTimeUs}")
     }
   }
 

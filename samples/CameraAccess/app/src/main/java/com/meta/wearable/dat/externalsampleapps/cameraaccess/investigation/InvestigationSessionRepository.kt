@@ -31,6 +31,7 @@ internal enum class InvestigationClientState {
 internal sealed class InvestigationClientError(open val message: String) {
   data object DuplicateSubmission : InvestigationClientError("An investigation is already running.")
   data class ValidationError(override val message: String) : InvestigationClientError(message)
+  data class EvidenceConversionError(override val message: String) : InvestigationClientError(message)
   data class BackendError(val category: String, override val message: String) : InvestigationClientError(message)
   data class ContractError(override val message: String) : InvestigationClientError(message)
   data class NetworkError(override val message: String) : InvestigationClientError(message)
@@ -88,6 +89,7 @@ internal sealed class InvestigationSubmissionOutcome {
 
 internal class InvestigationSessionRepository(
     private val api: InvestigationSessionApi,
+  private val normalizeImageEvidence: (InvestigationEvidenceInput) -> InvestigationEvidenceInput = ::normalizeImageEvidenceForBackend,
     private val pollDelay: suspend (Long) -> Unit = { delay(it) },
     private val clock: () -> Instant = { Instant.now() },
     private val maxPollAttempts: Int = 20,
@@ -123,9 +125,11 @@ internal class InvestigationSessionRepository(
     try {
       onProgress(InvestigationSubmissionProgress(clientState = InvestigationClientState.PREPARING))
       validateDraft(draft)
+      val explanation = draft.explanationText.trim()
 
       onProgress(InvestigationSubmissionProgress(clientState = InvestigationClientState.CREATING_SESSION))
       session = createSession(draft.clientMetadata)
+
         val totalImages = draft.evidence.size
       onProgress(
           InvestigationSubmissionProgress(
@@ -134,17 +138,17 @@ internal class InvestigationSessionRepository(
               backendStatus = session.status,
             uploadedImageCount = 0,
             totalImageCount = totalImages,
-            message = "Uploading image evidence.",
+            message = "Uploading image evidence and explanation.",
           ),
       )
 
-      val explanation = draft.explanationText.trim()
       draft.evidence.forEachIndexed { index, item ->
         ensureNotCancelled()
+        val explanationForUpload = if (index == 0) explanation else null
         uploadEvidence(
             sessionId = session.sessionId,
             item = item,
-            explanationText = if (index == 0 && explanation.isNotBlank()) explanation else null,
+            explanationText = explanationForUpload,
         )
         onProgress(
           InvestigationSubmissionProgress(
@@ -348,6 +352,17 @@ internal class InvestigationSessionRepository(
           ),
       )
       return InvestigationSubmissionOutcome.Failed(session, null, mapped)
+      } catch (error: InvestigationEvidenceConversionException) {
+        val mapped = InvestigationClientError.EvidenceConversionError(error.message)
+        onProgress(
+          InvestigationSubmissionProgress(
+            clientState = InvestigationClientState.FAILED,
+            sessionId = session?.sessionId,
+            backendStatus = session?.status,
+            message = mapped.message,
+          ),
+        )
+        return InvestigationSubmissionOutcome.Failed(session, null, mapped)
     } catch (error: IllegalArgumentException) {
       val mapped = InvestigationClientError.ValidationError(error.message ?: "Invalid investigation input.")
       onProgress(
@@ -396,6 +411,7 @@ internal class InvestigationSessionRepository(
       item: InvestigationEvidenceInput,
       explanationText: String?,
   ): BackendEvidenceDto {
+    val normalizedItem = normalizeImageEvidence(item)
     val request = BackendEvidenceUploadRequestDto(
         source = "android",
         clientTimestampUtc = Instant.now(),
@@ -405,13 +421,13 @@ internal class InvestigationSessionRepository(
         "capture_source_label" to item.source.displayLabel,
         "capture_slot_index" to item.slotIndex,
       ),
-        filename = item.filename,
-        mimeType = item.mimeType,
+        filename = normalizedItem.filename,
+        mimeType = normalizedItem.mimeType,
     )
     val payload = BackendEvidencePayloadDto(
-        filename = item.filename,
-        mimeType = item.mimeType,
-        bytes = item.bytes,
+        filename = normalizedItem.filename,
+        mimeType = normalizedItem.mimeType,
+        bytes = normalizedItem.bytes,
     )
     return api.uploadImageEvidence(sessionId, request, payload)
   }
@@ -419,6 +435,9 @@ internal class InvestigationSessionRepository(
   private fun validateDraft(draft: InvestigationSubmissionDraft) {
     if (draft.evidence.isEmpty()) {
       throw IllegalArgumentException("At least one image is required.")
+    }
+    if (draft.explanationText.trim().isEmpty()) {
+      throw IllegalArgumentException("Explanation is required before starting investigation.")
     }
     if (draft.evidence.size > 3) {
       throw IllegalArgumentException("At most three images are allowed.")

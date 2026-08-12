@@ -46,6 +46,22 @@ class InvestigationSessionRepositoryTest {
   }
 
   @Test
+  fun rejectsBlankExplanationBeforeNetworking() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api)
+
+    val outcome =
+        repository.submitInvestigation(
+            draft = InvestigationSubmissionDraft(evidence = listOf(image("one.jpg")), explanationText = "   "),
+        )
+
+    val failed = outcome as InvestigationSubmissionOutcome.Failed
+    assertTrue(failed.error is InvestigationClientError.ValidationError)
+    assertTrue(failed.error.message.contains("Explanation is required", ignoreCase = true))
+    assertEquals(0, api.createSessionCalls)
+  }
+
+  @Test
   fun fullWorkflowSequenceIsCreateUploadAnalyzePoll() = runBlocking {
     val api =
         FakeInvestigationSessionApi(
@@ -67,6 +83,84 @@ class InvestigationSessionRepositoryTest {
         listOf("create", "upload:one.jpg", "upload:two.jpg", "analyze", "poll"),
         api.callTrace,
     )
+  }
+
+  @Test
+  fun brandNewSessionDoesNotPerformIllegalResumeTransition() = runBlocking {
+    val api =
+        FakeInvestigationSessionApi(
+            failOnResumeFromCreated = true,
+            analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()),
+        )
+    val repository = InvestigationSessionRepository(api = api)
+
+    val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
+
+    assertTrue(outcome is InvestigationSubmissionOutcome.Completed)
+    assertEquals(listOf("create", "upload:one.jpg", "analyze"), api.callTrace)
+  }
+
+  @Test
+  fun oneImageInvestigationUploadsExactlyOneImage() = runBlocking {
+    val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
+    val repository = InvestigationSessionRepository(api = api)
+
+    repository.submitInvestigation(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("single.jpg", source = InvestigationEvidenceSource.LIVE_GLASSES)),
+            explanationText = "single capture",
+        ),
+    )
+
+    assertEquals(1, api.uploadedImageFilenames.size)
+    assertEquals("single.jpg", api.uploadedImageFilenames.single())
+  }
+
+  @Test
+  fun analysisStartsOnlyAfterEvidenceUploadSucceeds() = runBlocking {
+    val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
+    val repository = InvestigationSessionRepository(api = api)
+
+    repository.submitInvestigation(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("one.jpg"), image("two.jpg")),
+            explanationText = "order check",
+        ),
+    )
+
+    assertEquals(listOf("create", "upload:one.jpg", "upload:two.jpg", "analyze"), api.callTrace)
+  }
+
+  @Test
+  fun sessionCreationFailurePreventsUpload() = runBlocking {
+    val api =
+        FakeInvestigationSessionApi(
+            createException = BackendApiException(503, BackendApiErrorDto("backend_unreachable", "Backend is unavailable.")),
+        )
+    val repository = InvestigationSessionRepository(api = api)
+
+    val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
+
+    val failed = outcome as InvestigationSubmissionOutcome.Failed
+    assertTrue(failed.error is InvestigationClientError.BackendError)
+    assertEquals(0, api.uploadedImageFilenames.size)
+    assertEquals(0, api.analyzeCalls)
+  }
+
+  @Test
+  fun uploadFailurePreventsAnalyze() = runBlocking {
+    val api =
+        FakeInvestigationSessionApi(
+            uploadException = BackendApiException(422, BackendApiErrorDto("upload_rejected", "Image evidence failed validation.")),
+        )
+    val repository = InvestigationSessionRepository(api = api)
+
+    val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
+
+    val failed = outcome as InvestigationSubmissionOutcome.Failed
+    val backend = failed.error as InvestigationClientError.BackendError
+    assertEquals("upload_rejected", backend.category)
+    assertEquals(0, api.analyzeCalls)
   }
 
   @Test
@@ -101,6 +195,22 @@ class InvestigationSessionRepositoryTest {
     )
 
     assertEquals(listOf("spoken transcript", null), api.uploadedExplanationTexts)
+  }
+
+  @Test
+  fun explanationIsTrimmedAndSentOnFirstUploadBeforeAnalyze() = runBlocking {
+    val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
+    val repository = InvestigationSessionRepository(api = api)
+
+    repository.submitInvestigation(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("one.jpg")),
+            explanationText = "  spoken transcript  ",
+        ),
+    )
+
+    assertEquals(listOf("spoken transcript"), api.uploadedExplanationTexts)
+    assertEquals(listOf("create", "upload:one.jpg", "analyze"), api.callTrace)
   }
 
   @Test
@@ -187,7 +297,7 @@ class InvestigationSessionRepositoryTest {
         )
     val repository = InvestigationSessionRepository(api = api)
 
-    repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), ""))
+    repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "has explanation"))
 
     assertEquals(1, api.analyzeCalls)
   }
@@ -236,7 +346,7 @@ class InvestigationSessionRepositoryTest {
     val api = FakeInvestigationSessionApi(analyzeException = BackendApiException(422, BackendApiErrorDto("missing_explanation", "A non-empty normalized explanation is required before analysis.")))
     val repository = InvestigationSessionRepository(api = api)
 
-    val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), ""))
+    val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "has explanation"))
 
     val failed = outcome as InvestigationSubmissionOutcome.Failed
     val backend = failed.error as InvestigationClientError.BackendError
@@ -276,6 +386,27 @@ class InvestigationSessionRepositoryTest {
     assertEquals(1, api.analyzeCalls)
   }
 
+    @Test
+    fun pollingTerminatesAtClientTimeout() = runBlocking {
+    val api =
+      FakeInvestigationSessionApi(
+        analyzeResponse = analyzeResponse(status = BackendSessionStatus.ANALYZING, resultAvailable = false),
+        pollResponses = MutableList(10) { poll(status = BackendSessionStatus.ANALYZING, resultAvailable = false, pollAfterMs = 250) },
+      )
+    val repository =
+      InvestigationSessionRepository(
+        api = api,
+        pollDelay = { },
+        maxPollAttempts = 1,
+        maxPollingDurationMs = 60_000,
+      )
+
+    val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
+
+    val failed = outcome as InvestigationSubmissionOutcome.Failed
+    assertTrue(failed.error is InvestigationClientError.TimeoutError)
+    }
+
   @Test
   fun duplicateSubmissionIsPrevented() = runBlocking {
     val api = FakeInvestigationSessionApi(delayOnUploadMs = 50)
@@ -304,6 +435,119 @@ class InvestigationSessionRepositoryTest {
     )
 
     assertEquals(listOf("first.jpg", "second.jpg", "third.jpg"), api.uploadedImageFilenames)
+  }
+
+  @Test
+  fun jpegEvidenceRemainsValid() = runBlocking {
+    val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
+    val repository = InvestigationSessionRepository(api = api)
+
+    repository.submitInvestigation(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("camera.jpg", mimeType = "image/jpeg")),
+            explanationText = "Brake noise",
+        ),
+    )
+
+    assertEquals(listOf("camera.jpg"), api.uploadedImageFilenames)
+    assertEquals(listOf("image/jpeg"), api.uploadedImageMimeTypes)
+  }
+
+  @Test
+  fun pngEvidenceRemainsValid() = runBlocking {
+    val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
+    val repository = InvestigationSessionRepository(api = api)
+
+    repository.submitInvestigation(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("picker.png", mimeType = "image/png")),
+            explanationText = "Brake noise",
+        ),
+    )
+
+    assertEquals(listOf("picker.png"), api.uploadedImageFilenames)
+    assertEquals(listOf("image/png"), api.uploadedImageMimeTypes)
+  }
+
+  @Test
+  fun heicEvidenceIsConvertedToJpegBeforeUpload() = runBlocking {
+    val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
+    val repository =
+        InvestigationSessionRepository(
+            api = api,
+            normalizeImageEvidence = { evidence ->
+              if (evidence.mimeType == "image/heic" || evidence.mimeType == "image/heif") {
+                evidence.copy(filename = "${evidence.filename.substringBeforeLast('.')}.jpg", mimeType = "image/jpeg")
+              } else {
+                evidence
+              }
+            },
+        )
+
+    repository.submitInvestigation(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("capture_1.heic", mimeType = "image/heic")),
+            explanationText = "Brake noise",
+        ),
+    )
+
+    assertEquals(listOf("capture_1.jpg"), api.uploadedImageFilenames)
+    assertEquals(listOf("image/jpeg"), api.uploadedImageMimeTypes)
+  }
+
+  @Test
+  fun convertedEvidencePreservesUploadOrder() = runBlocking {
+    val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
+    val repository =
+        InvestigationSessionRepository(
+            api = api,
+            normalizeImageEvidence = { evidence ->
+              if (evidence.mimeType == "image/heic" || evidence.mimeType == "image/heif") {
+                evidence.copy(filename = "${evidence.filename.substringBeforeLast('.')}.jpg", mimeType = "image/jpeg")
+              } else {
+                evidence
+              }
+            },
+        )
+
+    repository.submitInvestigation(
+        InvestigationSubmissionDraft(
+            evidence =
+                listOf(
+                    image("first.heic", mimeType = "image/heic"),
+                    image("second.jpg", mimeType = "image/jpeg"),
+                    image("third.heif", mimeType = "image/heif"),
+                ),
+            explanationText = "Brake noise",
+        ),
+    )
+
+    assertEquals(listOf("first.jpg", "second.jpg", "third.jpg"), api.uploadedImageFilenames)
+    assertEquals(listOf("image/jpeg", "image/jpeg", "image/jpeg"), api.uploadedImageMimeTypes)
+  }
+
+  @Test
+  fun conversionFailureSurfacesExplicitError() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository =
+        InvestigationSessionRepository(
+            api = api,
+            normalizeImageEvidence = {
+              throw InvestigationEvidenceConversionException("Failed to convert HEIC evidence capture_1.heic to JPEG for backend upload.")
+            },
+        )
+
+    val outcome =
+        repository.submitInvestigation(
+            InvestigationSubmissionDraft(
+                evidence = listOf(image("capture_1.heic", mimeType = "image/heic")),
+                explanationText = "Brake noise",
+            ),
+        )
+
+    val failed = outcome as InvestigationSubmissionOutcome.Failed
+    assertTrue(failed.error is InvestigationClientError.EvidenceConversionError)
+    assertTrue(failed.error.message.contains("Failed to convert HEIC evidence", ignoreCase = true))
   }
 
   @Test
@@ -350,12 +594,13 @@ class InvestigationSessionRepositoryTest {
 
   private fun image(
       name: String,
+      mimeType: String = "image/jpeg",
       source: InvestigationEvidenceSource = InvestigationEvidenceSource.LOCAL_PICKER,
   ): InvestigationEvidenceInput {
     return InvestigationEvidenceInput(
         slotIndex = 0,
         filename = name,
-        mimeType = "image/jpeg",
+        mimeType = mimeType,
         bytes = byteArrayOf(1, 2, 3),
         source = source,
     )
@@ -364,6 +609,10 @@ class InvestigationSessionRepositoryTest {
 
 private class FakeInvestigationSessionApi(
     private val delayOnUploadMs: Long = 0,
+  private val requireCollectingBeforeUpload: Boolean = false,
+  private val failOnResumeFromCreated: Boolean = false,
+  private val createException: Exception? = null,
+  private val uploadException: Exception? = null,
     private val analyzeException: Exception? = null,
     private val analyzeResponse: BackendSessionAnalyzeResponseDto = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()),
     private val pollResponses: MutableList<BackendPollingResponseDto> = mutableListOf(),
@@ -379,17 +628,21 @@ private class FakeInvestigationSessionApi(
   var pollCalls: Int = 0
     private set
   val uploadedImageFilenames = mutableListOf<String>()
+  val uploadedImageMimeTypes = mutableListOf<String>()
   val uploadedExplanationTexts = mutableListOf<String?>()
   val uploadedEvidenceMetadata = mutableListOf<Map<String, Any?>>()
   val callTrace = mutableListOf<String>()
+  private var currentSessionStatus: BackendSessionStatus = BackendSessionStatus.CREATED
 
   override suspend fun createSession(request: BackendSessionCreateRequestDto): BackendSessionDto {
     callTrace += "create"
     createSessionCalls += 1
-    return session()
+    createException?.let { throw it }
+    currentSessionStatus = BackendSessionStatus.CREATED
+    return session(status = BackendSessionStatus.CREATED, revision = 0)
   }
 
-  override suspend fun getSession(sessionId: String): BackendSessionDto = session()
+  override suspend fun getSession(sessionId: String): BackendSessionDto = session(status = currentSessionStatus)
 
   override suspend fun pollSession(sessionId: String): BackendPollingResponseDto {
     callTrace += "poll"
@@ -410,11 +663,30 @@ private class FakeInvestigationSessionApi(
     return analyzeResponse
   }
 
-  override suspend fun pauseSession(sessionId: String, request: BackendSessionMutationRequestDto): BackendSessionDto = session()
+  override suspend fun pauseSession(sessionId: String, request: BackendSessionMutationRequestDto): BackendSessionDto {
+    currentSessionStatus = BackendSessionStatus.PAUSED
+    return session(status = BackendSessionStatus.PAUSED)
+  }
 
-  override suspend fun resumeSession(sessionId: String, request: BackendSessionMutationRequestDto): BackendSessionDto = session()
+  override suspend fun resumeSession(sessionId: String, request: BackendSessionMutationRequestDto): BackendSessionDto {
+    if (failOnResumeFromCreated && currentSessionStatus == BackendSessionStatus.CREATED) {
+      throw BackendApiException(
+          409,
+          BackendApiErrorDto(
+              "invalid_state_transition",
+              "Session cannot be resumed from the current state.",
+          ),
+      )
+    }
+    callTrace += "resume"
+    currentSessionStatus = BackendSessionStatus.COLLECTING
+    return session(status = BackendSessionStatus.COLLECTING, revision = 1)
+  }
 
-  override suspend fun cancelSession(sessionId: String, request: BackendSessionMutationRequestDto): BackendSessionDto = session()
+  override suspend fun cancelSession(sessionId: String, request: BackendSessionMutationRequestDto): BackendSessionDto {
+    currentSessionStatus = BackendSessionStatus.CANCELLED
+    return session(status = BackendSessionStatus.CANCELLED)
+  }
 
   override suspend fun uploadImageEvidence(
       sessionId: String,
@@ -424,8 +696,22 @@ private class FakeInvestigationSessionApi(
     if (delayOnUploadMs > 0) {
       delay(delayOnUploadMs)
     }
+    if (currentSessionStatus == BackendSessionStatus.CREATED) {
+      currentSessionStatus = BackendSessionStatus.COLLECTING
+    }
+    if (requireCollectingBeforeUpload && currentSessionStatus != BackendSessionStatus.COLLECTING) {
+      throw BackendApiException(
+        409,
+        BackendApiErrorDto(
+          "invalid_state_transition",
+          "Evidence can only be uploaded while collecting.",
+        ),
+      )
+    }
+    uploadException?.let { throw it }
     callTrace += "upload:${payload.filename}"
     uploadedImageFilenames += payload.filename
+    uploadedImageMimeTypes += payload.mimeType
     uploadedExplanationTexts += request.normalizedText
     uploadedEvidenceMetadata += request.metadata ?: emptyMap()
     return evidence(payload.filename)
@@ -439,12 +725,15 @@ private class FakeInvestigationSessionApi(
     return evidence(payload.filename)
   }
 
-  private fun session(): BackendSessionDto {
+  private fun session(
+      status: BackendSessionStatus,
+      revision: Int = 1,
+  ): BackendSessionDto {
     return BackendSessionDto(
         schemaVersion = "2.0",
         sessionId = SESSION_ID,
-        status = BackendSessionStatus.COLLECTING,
-        revision = 1,
+        status = status,
+        revision = revision,
         createdAtUtc = Instant.parse("2026-07-18T10:00:00Z"),
         updatedAtUtc = Instant.parse("2026-07-18T10:00:01Z"),
         pausedAtUtc = null,

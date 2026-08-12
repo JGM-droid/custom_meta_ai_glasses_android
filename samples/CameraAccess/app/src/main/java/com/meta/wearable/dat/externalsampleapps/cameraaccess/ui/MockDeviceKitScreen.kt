@@ -66,6 +66,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.mockdevicekit.MockDeviceInfo
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.mockdevicekit.MockDeviceKitViewModel
@@ -77,6 +78,13 @@ fun MockDeviceKitScreen(
     viewModel: MockDeviceKitViewModel = viewModel(LocalActivity.current as ComponentActivity),
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+  val investigationViewModel: InvestigationSessionDebugViewModel =
+    viewModel(
+      factory =
+        InvestigationSessionDebugViewModel.factory(
+          (LocalActivity.current as ComponentActivity).application,
+        ),
+    )
 
   Column(
       modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -145,7 +153,10 @@ fun MockDeviceKitScreen(
       }
     }
 
-    BackendInvestigationPanel(modifier = Modifier.fillMaxWidth())
+    BackendInvestigationPanel(
+        modifier = Modifier.fillMaxWidth(),
+        viewModel = investigationViewModel,
+    )
   }
 }
 

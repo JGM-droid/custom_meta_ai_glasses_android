@@ -144,6 +144,7 @@ internal fun StreamScreen(
         BackendInvestigationPanel(
             modifier = Modifier.fillMaxWidth(),
             prefillLiveEvidence = streamUiState.capturedInvestigationEvidence,
+            viewModel = investigationViewModel,
         )
       }
     }

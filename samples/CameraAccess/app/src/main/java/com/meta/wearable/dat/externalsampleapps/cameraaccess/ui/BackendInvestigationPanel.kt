@@ -1,9 +1,9 @@
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 
+import android.Manifest
 import android.net.Uri
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.GetContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,7 +12,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -23,33 +25,61 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.BuildConfig
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceInput
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceSource
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.bitmapToInvestigationEvidence
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.liveCaptureFilename
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun BackendInvestigationPanel(
     modifier: Modifier = Modifier,
     prefillLiveEvidence: InvestigationEvidenceInput? = null,
-    viewModel: InvestigationSessionDebugViewModel =
-        viewModel(
-            factory =
-                InvestigationSessionDebugViewModel.factory(
-                    (LocalActivity.current as ComponentActivity).application,
-                ),
-        ),
+    viewModel: InvestigationSessionDebugViewModel,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+  var showCameraPermissionAlert by remember { mutableStateOf(false) }
+  val panelScrollState = rememberScrollState()
+
+  val phoneCameraCaptureLauncher =
+      rememberLauncherForActivityResult(contract = ActivityResultContracts.TakePicturePreview()) { bitmap ->
+        bitmap?.let {
+          val evidence =
+              bitmapToInvestigationEvidence(
+                  bitmap = it,
+                  slotIndex = 0,
+                  filename = liveCaptureFilename(slotIndex = 0, extension = "png"),
+                  source = InvestigationEvidenceSource.LOCAL_PICKER,
+              )
+          viewModel.setEvidence(0, evidence)
+        }
+      }
+
+  val cameraPermissionLauncher =
+      rememberLauncherForActivityResult(contract = ActivityResultContracts.RequestPermission()) {
+          granted ->
+        if (granted) {
+          phoneCameraCaptureLauncher.launch(null)
+        } else {
+          showCameraPermissionAlert = true
+        }
+      }
+
   LaunchedEffect(prefillLiveEvidence) {
     prefillLiveEvidence?.let { viewModel.setEvidence(0, it) }
   }
@@ -76,7 +106,10 @@ internal fun BackendInvestigationPanel(
       colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
       shape = RoundedCornerShape(16.dp),
   ) {
-    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(
+      modifier = Modifier.padding(12.dp).verticalScroll(panelScrollState),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
       Text(
           text = "Investigation Session Backend",
           style = MaterialTheme.typography.titleMedium,
@@ -103,6 +136,19 @@ internal fun BackendInvestigationPanel(
 
       Text(
           text = "Images must stay ordered.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        Button(
+            onClick = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
+            modifier = Modifier.weight(1f),
+        ) {
+          Text("Capture with phone camera")
+        }
+      }
+      Text(
+          text = if (uiState.images.firstOrNull()?.displayName != null) "Captured image ready." else "No captured image selected yet.",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
@@ -147,19 +193,45 @@ internal fun BackendInvestigationPanel(
 
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         Button(
-            onClick = viewModel::runConnectivityCheck,
+            onClick = viewModel::onCheckBackendButtonClick,
             modifier = Modifier.weight(1f),
             enabled = !uiState.isRunning,
         ) {
           Text("Check backend")
         }
         Button(
-            onClick = viewModel::submitInvestigation,
+            onClick = viewModel::onStartInvestigationButtonClick,
             modifier = Modifier.weight(1f),
             enabled = !uiState.isRunning,
         ) {
-          Text("Submit")
+          Text(if (uiState.isRunning) "Running..." else "Start investigation")
         }
+      }
+      Row(
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          modifier = Modifier.fillMaxWidth(),
+      ) {
+        if (uiState.isRunning) {
+          CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+        }
+        Text(
+            text = uiState.statusMessage ?: when (uiState.clientState) {
+              com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState.COMPLETED ->
+                  "Investigation completed."
+              com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState.FAILED ->
+                  "Investigation failed."
+              com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState.CANCELLED ->
+                  "Investigation cancelled."
+              else -> "Ready."
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color =
+                when (uiState.clientState) {
+                  com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState.FAILED -> Color(0xFFAA071E)
+                  com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState.COMPLETED -> Color(0xFF0A7A2E)
+                  else -> MaterialTheme.colorScheme.onSurface
+                },
+        )
       }
       if (uiState.isRunning) {
         Button(
@@ -174,6 +246,17 @@ internal fun BackendInvestigationPanel(
       HorizontalDivider()
       SessionStatusSummary(uiState = uiState)
     }
+  }
+
+  if (showCameraPermissionAlert) {
+    AlertDialog(
+        onDismissRequest = { showCameraPermissionAlert = false },
+        title = { Text("Camera permission required") },
+        text = { Text("Allow Camera permission to capture an image from this phone.") },
+        confirmButton = {
+          TextButton(onClick = { showCameraPermissionAlert = false }) { Text("OK") }
+        },
+    )
   }
 }
 

@@ -49,6 +49,21 @@ internal class HttpUrlInvestigationSessionApi(
         path = "/investigation-sessions",
         requestBody = request.toJsonObject().toString(),
     )
+    if (!response.has("session_id") || !response.has("status")) {
+      val backendMessage =
+          response.optJSONObject("Exception")?.optString("Message")
+              ?: response.optString("message")
+              ?: "Unexpected create-session payload."
+      throw BackendApiException(
+          code = 502,
+          error =
+              BackendApiErrorDto(
+                  category = "backend_contract_mismatch",
+                  message =
+                      "Backend response does not match investigation session contract. $backendMessage",
+              ),
+      )
+    }
     return BackendSessionDto.fromJsonObject(response)
   }
 

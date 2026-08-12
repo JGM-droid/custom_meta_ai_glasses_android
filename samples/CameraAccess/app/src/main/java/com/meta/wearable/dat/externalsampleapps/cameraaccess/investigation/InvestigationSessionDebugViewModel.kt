@@ -9,11 +9,13 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.BuildConfig
 import java.io.InputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 
 internal data class InvestigationImageSlotUiState(
@@ -54,6 +56,22 @@ internal class InvestigationSessionDebugViewModel(
         api = HttpUrlInvestigationSessionApi(InvestigationBackendConfig.resolveBaseUrl()),
     ),
 ) : AndroidViewModel(application) {
+  companion object {
+    private const val SUBMISSION_TIMEOUT_MS = 120_000L
+
+    fun factory(application: Application): ViewModelProvider.Factory {
+      return object : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
+          if (modelClass.isAssignableFrom(InvestigationSessionDebugViewModel::class.java)) {
+            return InvestigationSessionDebugViewModel(application) as T
+          }
+          throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+        }
+      }
+    }
+  }
+
   private val _uiState = MutableStateFlow(InvestigationSessionDebugUiState())
   val uiState: StateFlow<InvestigationSessionDebugUiState> = _uiState.asStateFlow()
 
@@ -65,6 +83,14 @@ internal class InvestigationSessionDebugViewModel(
           backendBaseUrl = InvestigationBackendConfig.resolveBaseUrl(BuildConfig.INVESTIGATION_BACKEND_BASE_URL),
       )
     }
+  }
+
+  fun onCheckBackendButtonClick() {
+    runConnectivityCheck()
+  }
+
+  fun onStartInvestigationButtonClick() {
+    submitInvestigation()
   }
 
   fun setExplanationText(text: String) {
@@ -112,7 +138,14 @@ internal class InvestigationSessionDebugViewModel(
   }
 
   fun runConnectivityCheck() {
-    if (activeJob?.isActive == true) return
+    if (activeJob?.isActive == true) {
+      return
+    }
+    val backendUrlValidation =
+        InvestigationBackendConfig.validateConnectivityBaseUrl(_uiState.value.backendBaseUrl)
+    if (applyBackendUrlValidationFailure(backendUrlValidation)) {
+      return
+    }
     activeJob = viewModelScope.launch {
       _uiState.update {
         it.copy(
@@ -160,102 +193,160 @@ internal class InvestigationSessionDebugViewModel(
               statusMessage = error.message ?: error::class.java.simpleName,
           )
         }
+      } finally {
+        activeJob = null
       }
     }
   }
 
   fun submitInvestigation() {
-    if (activeJob?.isActive == true) return
+    if (activeJob?.isActive == true) {
+      return
+    }
+    val backendUrlValidation =
+        InvestigationBackendConfig.validateSubmissionBaseUrl(_uiState.value.backendBaseUrl)
+    if (applyBackendUrlValidationFailure(backendUrlValidation)) {
+      return
+    }
     activeJob = viewModelScope.launch {
-      val draft =
-          withContext(Dispatchers.IO) {
-            buildDraft()
-          } ?: run {
-            _uiState.update { it.copy(statusMessage = "Select 1 to 3 images before submitting.") }
-            return@launch
-          }
-      _uiState.update {
-        it.copy(
-            isRunning = true,
-            statusMessage = null,
-            backendErrorCategory = null,
-            clientState = InvestigationClientState.PREPARING,
-        )
-      }
-      val outcome =
-          withContext(Dispatchers.IO) {
-            repository.submitInvestigation(
-                draft = draft,
-                onProgress = { progress ->
-                  _uiState.update { state ->
-                    state.copy(
-                        clientState = progress.clientState,
-                        sessionId = progress.sessionId ?: state.sessionId,
-                        backendStatus = progress.backendStatus ?: state.backendStatus,
-                        investigationId = progress.investigationId ?: state.investigationId,
-                        compactResult = progress.compactResult ?: state.compactResult,
-                        analyzeAccepted = progress.analyzeAccepted ?: state.analyzeAccepted,
-                        pollAfterMs = progress.pollAfterMs ?: state.pollAfterMs,
-                        imageCount = progress.imageCount ?: state.imageCount,
-                        uploadedImageCount = progress.uploadedImageCount ?: state.uploadedImageCount,
-                        totalImageCount = progress.totalImageCount ?: state.totalImageCount,
-                        explanationPresent = progress.explanationPresent ?: state.explanationPresent,
-                        isRunning = progress.clientState !in setOf(InvestigationClientState.COMPLETED, InvestigationClientState.FAILED, InvestigationClientState.CANCELLED),
-                        statusMessage = progress.message ?: state.statusMessage,
-                    )
-                  }
-                },
-            )
+      try {
+        val draft =
+            withContext(Dispatchers.IO) {
+              buildDraft()
+            } ?: run {
+              _uiState.update {
+                it.copy(
+                    isRunning = false,
+                    clientState = InvestigationClientState.FAILED,
+                    backendErrorCategory = "validation",
+                    statusMessage = "Select 1 to 3 images before submitting.",
+                )
+              }
+              return@launch
+            }
+        _uiState.update {
+          it.copy(
+              isRunning = true,
+              statusMessage = null,
+              backendErrorCategory = null,
+              clientState = InvestigationClientState.PREPARING,
+          )
+        }
+        val outcome =
+            withTimeout(SUBMISSION_TIMEOUT_MS) {
+              withContext(Dispatchers.IO) {
+                repository.submitInvestigation(
+                    draft = draft,
+                    onProgress = { progress ->
+                      _uiState.update { state ->
+                        state.copy(
+                            clientState = progress.clientState,
+                            sessionId = progress.sessionId ?: state.sessionId,
+                            backendStatus = progress.backendStatus ?: state.backendStatus,
+                            investigationId = progress.investigationId ?: state.investigationId,
+                            compactResult = progress.compactResult ?: state.compactResult,
+                            analyzeAccepted = progress.analyzeAccepted ?: state.analyzeAccepted,
+                            pollAfterMs = progress.pollAfterMs ?: state.pollAfterMs,
+                            imageCount = progress.imageCount ?: state.imageCount,
+                            uploadedImageCount = progress.uploadedImageCount ?: state.uploadedImageCount,
+                            totalImageCount = progress.totalImageCount ?: state.totalImageCount,
+                            explanationPresent = progress.explanationPresent ?: state.explanationPresent,
+                            isRunning =
+                                progress.clientState !in
+                                    setOf(
+                                        InvestigationClientState.COMPLETED,
+                                        InvestigationClientState.FAILED,
+                                        InvestigationClientState.CANCELLED,
+                                    ),
+                            statusMessage = progress.message ?: state.statusMessage,
+                        )
+                      }
+                    },
+                )
+              }
+            }
+
+        when (outcome) {
+          is InvestigationSubmissionOutcome.Completed -> {
+            _uiState.update {
+              it.copy(
+                  isRunning = false,
+                  clientState = InvestigationClientState.COMPLETED,
+                  sessionId = outcome.polling.sessionId,
+                  backendStatus = outcome.polling.status,
+                  investigationId = outcome.polling.investigationId,
+                  compactResult = outcome.polling.compactResult,
+                  analyzeAccepted = outcome.analyzeResponse.accepted,
+                  pollAfterMs = outcome.polling.pollAfterMs,
+                  imageCount = outcome.polling.imageCount,
+                  explanationPresent = outcome.polling.explanationPresent,
+                  uploadedImageCount = it.totalImageCount,
+                  statusMessage = "Investigation completed.",
+              )
+            }
           }
 
-      when (outcome) {
-        is InvestigationSubmissionOutcome.Completed -> {
-          _uiState.update {
-            it.copy(
-                isRunning = false,
-                clientState = InvestigationClientState.COMPLETED,
-                sessionId = outcome.polling.sessionId,
-                backendStatus = outcome.polling.status,
-                investigationId = outcome.polling.investigationId,
-                compactResult = outcome.polling.compactResult,
-                analyzeAccepted = outcome.analyzeResponse.accepted,
-                pollAfterMs = outcome.polling.pollAfterMs,
-                imageCount = outcome.polling.imageCount,
-                explanationPresent = outcome.polling.explanationPresent,
-                uploadedImageCount = it.totalImageCount,
-                statusMessage = "Investigation completed.",
-            )
+          is InvestigationSubmissionOutcome.Cancelled -> {
+            _uiState.update {
+              it.copy(
+                  isRunning = false,
+                  clientState = InvestigationClientState.CANCELLED,
+                  sessionId = outcome.session?.sessionId ?: it.sessionId,
+                  backendErrorCategory = "cancelled",
+                  statusMessage = "Submission cancelled.",
+              )
+            }
+          }
+
+          is InvestigationSubmissionOutcome.Failed -> {
+            _uiState.update {
+              it.copy(
+                  isRunning = false,
+                  clientState = InvestigationClientState.FAILED,
+                  sessionId = outcome.session?.sessionId ?: it.sessionId,
+                  backendStatus = outcome.session?.status ?: it.backendStatus,
+                  backendErrorCategory = (outcome.error as? InvestigationClientError.BackendError)?.category,
+                  statusMessage = outcome.error.message,
+              )
+            }
           }
         }
-        is InvestigationSubmissionOutcome.Cancelled -> {
-          _uiState.update {
-            it.copy(
-                isRunning = false,
-                clientState = InvestigationClientState.CANCELLED,
-                sessionId = outcome.session?.sessionId ?: it.sessionId,
-                backendErrorCategory = "cancelled",
-                statusMessage = "Submission cancelled.",
-            )
-          }
+      } catch (timeout: TimeoutCancellationException) {
+        _uiState.update {
+          it.copy(
+              isRunning = false,
+              clientState = InvestigationClientState.FAILED,
+              backendErrorCategory = "client_timeout",
+              statusMessage = "Investigation timed out. Please retry.",
+          )
         }
-        is InvestigationSubmissionOutcome.Failed -> {
-          _uiState.update {
-            it.copy(
-                isRunning = false,
-                clientState = InvestigationClientState.FAILED,
-                sessionId = outcome.session?.sessionId ?: it.sessionId,
-                backendStatus = outcome.session?.status ?: it.backendStatus,
-                backendErrorCategory = (outcome.error as? InvestigationClientError.BackendError)?.category,
-                statusMessage = outcome.error.message,
-            )
-          }
+      } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        _uiState.update {
+          it.copy(
+              isRunning = false,
+              clientState = InvestigationClientState.CANCELLED,
+              backendErrorCategory = "cancelled",
+              statusMessage = "Submission cancelled.",
+          )
         }
+      } catch (error: Exception) {
+        _uiState.update {
+          it.copy(
+              isRunning = false,
+              clientState = InvestigationClientState.FAILED,
+              backendErrorCategory = it.backendErrorCategory ?: "client_unexpected_exception",
+              statusMessage = error.message ?: error::class.java.simpleName,
+          )
+        }
+      } finally {
+        activeJob = null
       }
     }
   }
 
   fun cancelSubmission() {
     activeJob?.cancel()
+    activeJob = null
     _uiState.update {
       it.copy(
           isRunning = false,
@@ -311,17 +402,26 @@ internal class InvestigationSessionDebugViewModel(
     return context.contentResolver.getType(uri)
   }
 
-  companion object {
-    fun factory(application: Application): ViewModelProvider.Factory {
-      return object : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
-          if (modelClass.isAssignableFrom(InvestigationSessionDebugViewModel::class.java)) {
-            return InvestigationSessionDebugViewModel(application) as T
-          }
-          throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
-        }
-      }
+  private fun applyBackendUrlValidationFailure(
+      validation: InvestigationBackendUrlValidation,
+  ): Boolean {
+    if (validation.isAllowed) {
+      return false
     }
+
+    _uiState.update {
+      it.copy(
+          isRunning = false,
+          clientState = InvestigationClientState.FAILED,
+          backendErrorCategory = validation.errorCategory,
+          statusMessage = validation.message,
+      )
+    }
+    return true
   }
+
+  override fun onCleared() {
+    super.onCleared()
+  }
+
 }
