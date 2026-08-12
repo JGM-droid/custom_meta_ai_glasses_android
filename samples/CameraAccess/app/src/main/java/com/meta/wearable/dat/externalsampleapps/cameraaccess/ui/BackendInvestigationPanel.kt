@@ -41,8 +41,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.BuildConfig
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceInput
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceSource
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationProductPhase
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.bitmapToInvestigationEvidence
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.deriveInvestigationProductState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.liveCaptureFilename
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -55,7 +57,9 @@ internal fun BackendInvestigationPanel(
   onPrefillApplied: (() -> Unit)? = null,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+  val productState = remember(uiState) { deriveInvestigationProductState(uiState) }
   var showCameraPermissionAlert by remember { mutableStateOf(false) }
+  var showDeveloperDetails by remember { mutableStateOf(false) }
   val panelScrollState = rememberScrollState()
 
   val phoneCameraCaptureLauncher =
@@ -116,148 +120,116 @@ internal fun BackendInvestigationPanel(
       verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
       Text(
-          text = "Investigation Session Backend",
+          text = "INVESTIGATION",
           style = MaterialTheme.typography.titleMedium,
           fontWeight = FontWeight.SemiBold,
       )
+
       Text(
-          text = "Base URL: ${uiState.backendBaseUrl}",
+          text =
+              when (productState.phase) {
+                InvestigationProductPhase.READY -> "Ready to capture your first view."
+                InvestigationProductPhase.COLLECTING_EVIDENCE ->
+                    "${productState.capturedViewCount} view(s) captured. Collect more or add context."
+                InvestigationProductPhase.READY_TO_ANALYZE ->
+                    "Ready to analyze with ${productState.capturedViewCount} view(s)."
+                InvestigationProductPhase.ANALYZING -> "Analyzing investigation..."
+                InvestigationProductPhase.COMPLETED -> "Investigation completed."
+                InvestigationProductPhase.FAILED -> "Investigation failed. Review and retry."
+              },
           style = MaterialTheme.typography.bodyMedium,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
-      if (BuildConfig.DEBUG && BuildConfig.INVESTIGATION_BACKEND_BASE_URL.contains("cloudflare", ignoreCase = true)) {
-        Text(
-            text = "Temporary tunnel configured in BuildConfig.",
-            color = Color(0xFF8A4B00),
-            style = MaterialTheme.typography.bodySmall,
-        )
-      }
+
       HorizontalDivider()
-      Text(
-          text = "Session workflow: create, upload ordered evidence, initiate analysis, then poll only when needed.",
-          style = MaterialTheme.typography.bodySmall,
-          color = Color(0xFF8A4B00),
-      )
 
       Text(
-          text = "Images must stay ordered.",
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          text = "Evidence",
+          style = MaterialTheme.typography.titleSmall,
+          fontWeight = FontWeight.SemiBold,
       )
-      Text(
-          text = "Capture order: View 1 -> View 2 -> View 3",
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
+      uiState.images.forEach { slot ->
+        val captured = slot.evidence != null || slot.uriString != null
+        Text(
+            text = "View ${slot.slotIndex + 1} - ${if (captured) "captured" else "not captured"}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+      }
+
       if (onCaptureAnotherView != null) {
         Button(
             onClick = {
-              if (uiState.hasCaptureCapacity) {
+              if (productState.hasCaptureCapacity && !uiState.isRunning) {
                 viewModel.clearInvestigationResultStatus()
                 onCaptureAnotherView()
               }
             },
-            enabled = uiState.hasCaptureCapacity && !uiState.isRunning,
+            enabled = productState.hasCaptureCapacity && !uiState.isRunning,
             modifier = Modifier.fillMaxWidth(),
         ) {
-          Text(if (uiState.hasCaptureCapacity) "Capture another view" else "Maximum 3 views captured")
+          Text(productState.captureActionLabel)
         }
       }
+
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         Button(
             onClick = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
             modifier = Modifier.weight(1f),
+            enabled = !uiState.isRunning,
         ) {
           Text("Capture with phone camera")
         }
       }
+
+      HorizontalDivider()
+
       Text(
-          text = if (uiState.images.firstOrNull()?.displayName != null) "Captured image ready." else "No captured image selected yet.",
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          text = "Context",
+          style = MaterialTheme.typography.titleSmall,
+          fontWeight = FontWeight.SemiBold,
       )
-      uiState.images.forEach { slot ->
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-          Button(
-              onClick = { slotPickers[slot.slotIndex].launch("image/*") },
-              modifier = Modifier.weight(1f),
-          ) {
-            Text(
-                text = slot.displayName?.let { "View ${slot.slotIndex + 1}: $it" }
-                    ?: "Pick image for View ${slot.slotIndex + 1}",
-            )
-          }
-          TextButton(
-              onClick = { viewModel.clearImage(slot.slotIndex) },
-          ) {
-            Text("Clear")
-          }
-        }
+      OutlinedTextField(
+          value = uiState.explanationText,
+          onValueChange = viewModel::setExplanationText,
+          modifier = Modifier.fillMaxWidth(),
+          label = { Text("Explanation") },
+          placeholder = { Text("Describe what the captured views show") },
+          minLines = 2,
+          maxLines = 4,
+      )
+
+      Button(
+          onClick = viewModel::onStartInvestigationButtonClick,
+          modifier = Modifier.fillMaxWidth(),
+          enabled = productState.canAnalyze && !uiState.isRunning,
+      ) {
         Text(
-            text = slot.evidence?.source?.displayLabel ?: "Source: Local picker",
+            when {
+              uiState.isRunning -> "Analyzing..."
+              productState.phase == InvestigationProductPhase.FAILED && productState.canAnalyze ->
+                  "Retry analysis"
+              else -> "Analyze investigation"
+            }
+        )
+      }
+
+      if (!productState.canAnalyze && !uiState.isRunning) {
+        Text(
+            text = "Add at least 1 view and explanation to analyze.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
       }
 
-      OutlinedTextField(
-          value = uiState.explanationText,
-          onValueChange = viewModel::setExplanationText,
-          modifier = Modifier.fillMaxWidth(),
-          label = { Text("Explanation text") },
-          placeholder = { Text("One spoken or typed explanation") },
-          minLines = 2,
-          maxLines = 4,
-      )
-        Text(
-          text = "Explanation text is sent only through the supported multipart field normalized_text on evidence upload.",
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        Button(
-            onClick = viewModel::onCheckBackendButtonClick,
-            modifier = Modifier.weight(1f),
-            enabled = !uiState.isRunning,
-        ) {
-          Text("Check backend")
-        }
-        Button(
-            onClick = viewModel::onStartInvestigationButtonClick,
-            modifier = Modifier.weight(1f),
-            enabled = !uiState.isRunning,
-        ) {
-          Text(if (uiState.isRunning) "Running..." else "Start investigation")
-        }
-      }
-      Row(
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-          modifier = Modifier.fillMaxWidth(),
-      ) {
-        if (uiState.isRunning) {
-          CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
-        }
-        Text(
-            text = uiState.statusMessage ?: when (uiState.clientState) {
-              com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState.COMPLETED ->
-                  "Investigation completed."
-              com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState.FAILED ->
-                  "Investigation failed."
-              com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState.CANCELLED ->
-                  "Investigation cancelled."
-              else -> "Ready."
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color =
-                when (uiState.clientState) {
-                  com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState.FAILED -> Color(0xFFAA071E)
-                  com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState.COMPLETED -> Color(0xFF0A7A2E)
-                  else -> MaterialTheme.colorScheme.onSurface
-                },
-        )
-      }
       if (uiState.isRunning) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+          CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+          Text(
+              text = "Analyzing investigation... ${productState.capturedViewCount} view(s) + ${if (productState.hasExplanation) "explanation" else "no explanation"}",
+              style = MaterialTheme.typography.bodyMedium,
+          )
+        }
         Button(
             onClick = viewModel::cancelSubmission,
             modifier = Modifier.fillMaxWidth(),
@@ -267,8 +239,95 @@ internal fun BackendInvestigationPanel(
         }
       }
 
-      HorizontalDivider()
-      SessionStatusSummary(uiState = uiState)
+        val compactResult = uiState.compactResult
+        if (productState.phase == InvestigationProductPhase.COMPLETED && compactResult != null) {
+        HorizontalDivider()
+        Text(
+            text = "DIAGNOSIS",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+          text = compactResult.diagnosisShort,
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Text(
+            text = "NEXT ACTION",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+          text = compactResult.requiredNextActionShort,
+            style = MaterialTheme.typography.bodyLarge,
+        )
+      }
+
+      if (productState.phase == InvestigationProductPhase.FAILED && uiState.statusMessage != null) {
+        Text(
+            text = uiState.statusMessage ?: "Investigation failed.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color(0xFFAA071E),
+        )
+      }
+
+      TextButton(onClick = { showDeveloperDetails = !showDeveloperDetails }) {
+        Text(if (showDeveloperDetails) "Hide developer details" else "Developer details")
+      }
+
+      if (showDeveloperDetails) {
+        Text(
+            text = "Base URL: ${uiState.backendBaseUrl}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = "Session workflow: create, upload ordered evidence, initiate analysis, then poll when needed.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF8A4B00),
+        )
+        if (BuildConfig.DEBUG && BuildConfig.INVESTIGATION_BACKEND_BASE_URL.contains("cloudflare", ignoreCase = true)) {
+          Text(
+              text = "Temporary tunnel configured in BuildConfig.",
+              color = Color(0xFF8A4B00),
+              style = MaterialTheme.typography.bodySmall,
+          )
+        }
+        uiState.images.forEach { slot ->
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = { slotPickers[slot.slotIndex].launch("image/*") },
+                modifier = Modifier.weight(1f),
+                enabled = !uiState.isRunning,
+            ) {
+              Text(
+                  text = slot.displayName?.let { "View ${slot.slotIndex + 1}: $it" }
+                      ?: "Pick image for View ${slot.slotIndex + 1}",
+              )
+            }
+            TextButton(
+                onClick = { viewModel.clearImage(slot.slotIndex) },
+                enabled = !uiState.isRunning,
+            ) {
+              Text("Clear")
+            }
+          }
+          Text(
+              text = slot.evidence?.source?.displayLabel ?: "Source: Local picker",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+          Button(
+              onClick = viewModel::onCheckBackendButtonClick,
+              modifier = Modifier.weight(1f),
+              enabled = !uiState.isRunning,
+          ) {
+            Text("Check backend")
+          }
+        }
+        SessionStatusSummary(uiState = uiState)
+      }
     }
   }
 

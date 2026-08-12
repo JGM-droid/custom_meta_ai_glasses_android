@@ -25,8 +25,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -35,6 +40,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -47,6 +53,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.hasActiveInvestigation
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.investigationReopenAffordanceLabel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 
@@ -72,6 +80,16 @@ internal fun StreamScreen(
         ),
 ) {
   val streamUiState by streamViewModel.uiState.collectAsStateWithLifecycle()
+  val investigationUiState by investigationViewModel.uiState.collectAsStateWithLifecycle()
+  val showInvestigationReopenAffordance =
+      remember(streamUiState.isInvestigationPanelVisible, streamUiState.isShareDialogVisible, investigationUiState) {
+        !streamUiState.isInvestigationPanelVisible &&
+            !streamUiState.isShareDialogVisible &&
+            hasActiveInvestigation(investigationUiState)
+      }
+  val investigationReopenLabel = remember(investigationUiState) {
+    investigationReopenAffordanceLabel(investigationUiState)
+  }
   val investigationSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -150,6 +168,20 @@ internal fun StreamScreen(
             },
         )
       }
+    }
+
+    if (showInvestigationReopenAffordance) {
+      AssistChip(
+          onClick = { streamViewModel.showInvestigationPanel() },
+          label = { Text(investigationReopenLabel) },
+          leadingIcon = {
+            Icon(
+                imageVector = Icons.Default.Description,
+                contentDescription = "Investigation",
+            )
+          },
+          modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(16.dp),
+      )
     }
   }
 

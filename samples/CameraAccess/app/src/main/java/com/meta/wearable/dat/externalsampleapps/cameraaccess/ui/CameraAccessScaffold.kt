@@ -121,7 +121,7 @@ fun CameraAccessScaffold(
           },
       )
 
-      if (BuildConfig.DEBUG) {
+      if (BuildConfig.DEBUG && !uiState.isStreaming) {
         FloatingActionButton(
             onClick = { viewModel.showDebugMenu() },
             modifier = Modifier.align(Alignment.CenterEnd),
