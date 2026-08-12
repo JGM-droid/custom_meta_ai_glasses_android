@@ -28,6 +28,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -43,9 +45,12 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.Inves
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceSource
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationProductPhase
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSpeechEvent
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSpeechUiState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.bitmapToInvestigationEvidence
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.deriveInvestigationProductState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.liveCaptureFilename
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.reduceInvestigationSpeechState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,9 +63,32 @@ internal fun BackendInvestigationPanel(
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val productState = remember(uiState) { deriveInvestigationProductState(uiState) }
+  val context = LocalContext.current
+  val speechController = remember(context) { createInvestigationSpeechRecognizerController(context) }
   var showCameraPermissionAlert by remember { mutableStateOf(false) }
   var showDeveloperDetails by remember { mutableStateOf(false) }
+  var speechUiState by remember { mutableStateOf(InvestigationSpeechUiState()) }
   val panelScrollState = rememberScrollState()
+
+  DisposableEffect(speechController) {
+    onDispose { speechController?.destroy() }
+  }
+
+  val onSpeechEvent: (InvestigationSpeechEvent) -> Unit = { event ->
+    val transition = reduceInvestigationSpeechState(speechUiState, event)
+    speechUiState = transition.state
+    transition.transcript?.let { transcript -> viewModel.setExplanationText(transcript) }
+  }
+
+  val startSpeechCapture = {
+    if (speechController == null) {
+      onSpeechEvent(
+          InvestigationSpeechEvent.UnknownError("Speech recognition is unavailable on this device."),
+      )
+    } else {
+      speechController.startListening(onSpeechEvent)
+    }
+  }
 
   val phoneCameraCaptureLauncher =
       rememberLauncherForActivityResult(contract = ActivityResultContracts.TakePicturePreview()) { bitmap ->
@@ -83,6 +111,16 @@ internal fun BackendInvestigationPanel(
           phoneCameraCaptureLauncher.launch(null)
         } else {
           showCameraPermissionAlert = true
+        }
+      }
+
+  val microphonePermissionLauncher =
+      rememberLauncherForActivityResult(contract = ActivityResultContracts.RequestPermission()) {
+          granted ->
+        if (granted) {
+          startSpeechCapture()
+        } else {
+          onSpeechEvent(InvestigationSpeechEvent.PermissionDenied)
         }
       }
 
@@ -198,6 +236,33 @@ internal fun BackendInvestigationPanel(
           minLines = 2,
           maxLines = 4,
       )
+
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        Button(
+            onClick = { microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+            enabled = !speechUiState.canCancel,
+        ) {
+          Text(speechUiState.speakButtonLabel)
+        }
+        if (speechUiState.canCancel) {
+          TextButton(
+              onClick = {
+                speechController?.cancel()
+                onSpeechEvent(InvestigationSpeechEvent.Cancelled)
+              },
+          ) {
+            Text("Cancel")
+          }
+        }
+      }
+
+      speechUiState.feedbackMessage?.let { message ->
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
 
       Button(
           onClick = viewModel::onStartInvestigationButtonClick,

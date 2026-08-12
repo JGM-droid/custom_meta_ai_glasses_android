@@ -54,4 +54,53 @@ class InvestigationViewModelWiringContractTest {
     assertTrue(panel.contains("onCaptureAnotherView: (() -> Unit)? = null"))
     assertTrue(panel.contains("onPrefillApplied: (() -> Unit)? = null"))
   }
+
+  @Test
+  fun typedAndSpeechInputsBothUseSingleExplanationSetter() {
+    val panelPath =
+      Paths.get(
+        "src",
+        "main",
+        "java",
+        "com",
+        "meta",
+        "wearable",
+        "dat",
+        "externalsampleapps",
+        "cameraaccess",
+        "ui",
+        "BackendInvestigationPanel.kt",
+      )
+    val panel = String(Files.readAllBytes(panelPath), StandardCharsets.UTF_8)
+
+    assertTrue(panel.contains("onValueChange = viewModel::setExplanationText"))
+    assertTrue(panel.contains("viewModel.setExplanationText(transcript)"))
+    assertFalse(panel.contains("voiceExplanation"))
+    assertFalse(panel.contains("speechExplanation"))
+    assertFalse(panel.contains("audioExplanation"))
+  }
+
+  @Test
+  fun investigationUiStateKeepsSingleExplanationField() {
+    val viewModelPath =
+      Paths.get(
+        "src",
+        "main",
+        "java",
+        "com",
+        "meta",
+        "wearable",
+        "dat",
+        "externalsampleapps",
+        "cameraaccess",
+        "investigation",
+        "InvestigationSessionDebugViewModel.kt",
+      )
+    val source = String(Files.readAllBytes(viewModelPath), StandardCharsets.UTF_8)
+
+    assertTrue(source.contains("val explanationText: String = \"\""))
+    assertFalse(source.contains("voiceExplanation"))
+    assertFalse(source.contains("speechExplanation"))
+    assertFalse(source.contains("audioExplanation"))
+  }
 }
