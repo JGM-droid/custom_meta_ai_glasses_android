@@ -332,13 +332,15 @@ internal class StreamViewModel(
           ?.onSuccess { photoData ->
             Log.d(TAG, "Photo capture successful")
             val normalized = withContext(Dispatchers.Default) { normalizeCapturedPhoto(photoData) }
+            val returnToInvestigation = uiState.value.shouldReturnToInvestigationAfterCapture
             _uiState.update {
               it.copy(
                   isCapturing = false,
                   capturedPhoto = normalized.previewBitmap,
                   capturedInvestigationEvidence = normalized.investigationEvidence,
-                  isShareDialogVisible = true,
-                  isInvestigationPanelVisible = false,
+                  isShareDialogVisible = !returnToInvestigation,
+                  isInvestigationPanelVisible = returnToInvestigation,
+                  shouldReturnToInvestigationAfterCapture = false,
                   captureErrorMessage = null,
               )
             }
@@ -377,6 +379,21 @@ internal class StreamViewModel(
 
   fun hideInvestigationPanel() {
     _uiState.update { it.copy(isInvestigationPanelVisible = false) }
+  }
+
+  fun consumeCapturedInvestigationEvidence() {
+    _uiState.update { it.copy(capturedInvestigationEvidence = null) }
+  }
+
+  fun prepareForAdditionalInvestigationCapture() {
+    _uiState.update {
+      it.copy(
+          isInvestigationPanelVisible = false,
+          isShareDialogVisible = false,
+          shouldReturnToInvestigationAfterCapture = true,
+          captureErrorMessage = null,
+      )
+    }
   }
 
   fun sharePhoto(bitmap: Bitmap) {
@@ -561,6 +578,7 @@ internal class StreamViewModel(
           capturedInvestigationEvidence = null,
           isShareDialogVisible = false,
           isInvestigationPanelVisible = false,
+          shouldReturnToInvestigationAfterCapture = false,
           isCapturing = false,
           captureErrorMessage = null,
       )

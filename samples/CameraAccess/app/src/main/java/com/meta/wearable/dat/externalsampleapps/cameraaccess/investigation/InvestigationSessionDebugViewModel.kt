@@ -25,6 +25,53 @@ internal data class InvestigationImageSlotUiState(
   val evidence: InvestigationEvidenceInput? = null,
 )
 
+internal data class InvestigationCaptureAppendResult(
+    val images: List<InvestigationImageSlotUiState>,
+    val appendedSlotIndex: Int?,
+)
+
+internal object InvestigationCaptureSlots {
+  const val MAX_CAPTURE_SLOTS = 3
+
+  fun selectedCount(images: List<InvestigationImageSlotUiState>): Int {
+    return images.count { it.evidence != null || it.uriString != null }
+  }
+
+  fun hasCapacity(images: List<InvestigationImageSlotUiState>): Boolean {
+    return selectedCount(images) < MAX_CAPTURE_SLOTS
+  }
+
+  fun appendEvidence(
+      images: List<InvestigationImageSlotUiState>,
+      evidence: InvestigationEvidenceInput,
+  ): InvestigationCaptureAppendResult {
+    val nextSlot = images.firstOrNull { slot -> slot.evidence == null && slot.uriString == null }?.slotIndex
+    if (nextSlot == null) {
+      return InvestigationCaptureAppendResult(images = images, appendedSlotIndex = null)
+    }
+
+    val updatedImages =
+        images.map { slot ->
+          if (slot.slotIndex == nextSlot) {
+            slot.copy(
+                uriString = null,
+                displayName = evidence.filename,
+                evidence = evidence.copy(slotIndex = nextSlot),
+            )
+          } else {
+            slot
+          }
+        }
+    return InvestigationCaptureAppendResult(images = updatedImages, appendedSlotIndex = nextSlot)
+  }
+
+  fun orderedEvidence(images: List<InvestigationImageSlotUiState>): List<InvestigationEvidenceInput> {
+    return images
+        .sortedBy { it.slotIndex }
+        .mapNotNull { slot -> slot.evidence?.copy(slotIndex = slot.slotIndex) }
+  }
+}
+
 internal data class InvestigationSessionDebugUiState(
     val backendBaseUrl: String = InvestigationBackendConfig.resolveBaseUrl(),
     val clientState: InvestigationClientState = InvestigationClientState.IDLE,
@@ -45,6 +92,8 @@ internal data class InvestigationSessionDebugUiState(
         InvestigationImageSlotUiState(1),
         InvestigationImageSlotUiState(2),
     ),
+    val activeCaptureCount: Int = 0,
+    val hasCaptureCapacity: Boolean = true,
     val statusMessage: String? = null,
     val canSubmit: Boolean = false,
     val isRunning: Boolean = false,
@@ -99,14 +148,19 @@ internal class InvestigationSessionDebugViewModel(
 
   fun setImage(slotIndex: Int, uriString: String?, displayName: String?) {
     _uiState.update { state ->
-      state.copy(
-          images = state.images.map { slot ->
+      val updatedImages =
+          state.images.map { slot ->
             if (slot.slotIndex == slotIndex) {
               slot.copy(uriString = uriString, displayName = displayName, evidence = null)
             } else {
               slot
             }
-          },
+          }
+      val count = selectedSlotCount(updatedImages)
+      state.copy(
+          images = updatedImages,
+          activeCaptureCount = count,
+          hasCaptureCapacity = InvestigationCaptureSlots.hasCapacity(updatedImages),
           backendErrorCategory = null,
           statusMessage = null,
       )
@@ -115,18 +169,57 @@ internal class InvestigationSessionDebugViewModel(
 
   fun setEvidence(slotIndex: Int, evidence: InvestigationEvidenceInput) {
     _uiState.update { state ->
-      state.copy(
-          images = state.images.map { slot ->
+      val updatedImages =
+          state.images.map { slot ->
             if (slot.slotIndex == slotIndex) {
               slot.copy(
                   uriString = null,
                   displayName = evidence.filename,
-                  evidence = evidence,
+                  evidence = evidence.copy(slotIndex = slotIndex),
               )
             } else {
               slot
             }
-          },
+          }
+      val count = selectedSlotCount(updatedImages)
+      state.copy(
+          images = updatedImages,
+          activeCaptureCount = count,
+          hasCaptureCapacity = InvestigationCaptureSlots.hasCapacity(updatedImages),
+          backendErrorCategory = null,
+          statusMessage = null,
+      )
+    }
+  }
+
+  fun appendLiveEvidence(evidence: InvestigationEvidenceInput): Boolean {
+    var appended = false
+    _uiState.update { state ->
+      val appendedResult = InvestigationCaptureSlots.appendEvidence(state.images, evidence)
+      if (appendedResult.appendedSlotIndex == null) {
+        return@update state.copy(
+            hasCaptureCapacity = false,
+            statusMessage = "Maximum of 3 captures reached for this investigation.",
+        )
+      }
+
+      appended = true
+      val updatedImages = appendedResult.images
+      val count = selectedSlotCount(updatedImages)
+      state.copy(
+          images = updatedImages,
+          activeCaptureCount = count,
+          hasCaptureCapacity = InvestigationCaptureSlots.hasCapacity(updatedImages),
+          backendErrorCategory = null,
+          statusMessage = null,
+      )
+    }
+    return appended
+  }
+
+  fun clearInvestigationResultStatus() {
+    _uiState.update {
+      it.copy(
           backendErrorCategory = null,
           statusMessage = null,
       )
@@ -422,6 +515,10 @@ internal class InvestigationSessionDebugViewModel(
 
   override fun onCleared() {
     super.onCleared()
+  }
+
+  private fun selectedSlotCount(images: List<InvestigationImageSlotUiState>): Int {
+    return InvestigationCaptureSlots.selectedCount(images)
   }
 
 }

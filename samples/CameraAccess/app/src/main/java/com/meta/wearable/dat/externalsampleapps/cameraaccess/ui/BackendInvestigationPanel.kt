@@ -51,6 +51,8 @@ internal fun BackendInvestigationPanel(
     modifier: Modifier = Modifier,
     prefillLiveEvidence: InvestigationEvidenceInput? = null,
     viewModel: InvestigationSessionDebugViewModel,
+  onCaptureAnotherView: (() -> Unit)? = null,
+  onPrefillApplied: (() -> Unit)? = null,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   var showCameraPermissionAlert by remember { mutableStateOf(false) }
@@ -81,7 +83,10 @@ internal fun BackendInvestigationPanel(
       }
 
   LaunchedEffect(prefillLiveEvidence) {
-    prefillLiveEvidence?.let { viewModel.setEvidence(0, it) }
+    prefillLiveEvidence?.let {
+      viewModel.appendLiveEvidence(it)
+      onPrefillApplied?.invoke()
+    }
   }
   val firstImagePicker =
       rememberLauncherForActivityResult(contract = GetContent()) { uri: Uri? ->
@@ -139,6 +144,25 @@ internal fun BackendInvestigationPanel(
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
+      Text(
+          text = "Capture order: View 1 -> View 2 -> View 3",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+      if (onCaptureAnotherView != null) {
+        Button(
+            onClick = {
+              if (uiState.hasCaptureCapacity) {
+                viewModel.clearInvestigationResultStatus()
+                onCaptureAnotherView()
+              }
+            },
+            enabled = uiState.hasCaptureCapacity && !uiState.isRunning,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+          Text(if (uiState.hasCaptureCapacity) "Capture another view" else "Maximum 3 views captured")
+        }
+      }
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         Button(
             onClick = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
@@ -159,8 +183,8 @@ internal fun BackendInvestigationPanel(
               modifier = Modifier.weight(1f),
           ) {
             Text(
-                text = slot.displayName?.let { "Image ${slot.slotIndex + 1}: $it" }
-                    ?: "Pick image ${slot.slotIndex + 1}",
+                text = slot.displayName?.let { "View ${slot.slotIndex + 1}: $it" }
+                    ?: "Pick image for View ${slot.slotIndex + 1}",
             )
           }
           TextButton(

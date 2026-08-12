@@ -24,6 +24,7 @@ internal data class StreamUiState(
     val capturedInvestigationEvidence: InvestigationEvidenceInput? = null,
     val isShareDialogVisible: Boolean = false,
     val isInvestigationPanelVisible: Boolean = false,
+    val shouldReturnToInvestigationAfterCapture: Boolean = false,
     val isCapturing: Boolean = false,
     val captureErrorMessage: String? = null,
 )

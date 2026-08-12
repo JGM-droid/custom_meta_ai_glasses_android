@@ -82,9 +82,6 @@ internal fun StreamScreen(
   }
 
   LaunchedEffect(Unit) { streamViewModel.startStream() }
-  LaunchedEffect(streamUiState.capturedInvestigationEvidence) {
-    streamUiState.capturedInvestigationEvidence?.let { investigationViewModel.setEvidence(0, it) }
-  }
 
   Box(modifier = modifier.fillMaxSize()) {
     streamUiState.videoFrame?.let { videoFrame ->
@@ -145,6 +142,12 @@ internal fun StreamScreen(
             modifier = Modifier.fillMaxWidth(),
             prefillLiveEvidence = streamUiState.capturedInvestigationEvidence,
             viewModel = investigationViewModel,
+            onCaptureAnotherView = {
+              streamViewModel.prepareForAdditionalInvestigationCapture()
+            },
+            onPrefillApplied = {
+              streamViewModel.consumeCapturedInvestigationEvidence()
+            },
         )
       }
     }

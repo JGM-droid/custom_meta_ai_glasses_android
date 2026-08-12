@@ -27,6 +27,8 @@ class InvestigationViewModelWiringContractTest {
     val streamScreen = String(Files.readAllBytes(streamScreenPath), StandardCharsets.UTF_8)
 
     assertTrue(streamScreen.contains("viewModel = investigationViewModel"))
+    assertTrue(streamScreen.contains("onCaptureAnotherView ="))
+    assertTrue(streamScreen.contains("onPrefillApplied ="))
   }
 
   @Test
@@ -49,5 +51,7 @@ class InvestigationViewModelWiringContractTest {
 
     assertTrue(panel.contains("viewModel: InvestigationSessionDebugViewModel"))
     assertFalse(panel.contains("viewModel: InvestigationSessionDebugViewModel ="))
+    assertTrue(panel.contains("onCaptureAnotherView: (() -> Unit)? = null"))
+    assertTrue(panel.contains("onPrefillApplied: (() -> Unit)? = null"))
   }
 }
