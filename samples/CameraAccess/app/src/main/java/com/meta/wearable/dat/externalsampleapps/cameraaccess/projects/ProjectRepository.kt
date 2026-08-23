@@ -35,9 +35,16 @@ interface ProjectRepository {
 
   /** Throws on network/backend failure - callers map that to an error UI state. */
   suspend fun getProjectOverview(projectId: String): ProjectOverview
+
+  /**
+   * Creates a real backend Project via POST /projects and returns its canonical identity. Throws
+   * on validation/network/backend failure - the caller keeps the form editable and surfaces the
+   * error rather than assuming success.
+   */
+  suspend fun createProject(request: NewProjectRequest): ProjectSummary
 }
 
-/** Production repository: reads real Project Memory data from the FastAPI backend. */
+/** Production repository: reads/creates real Project Memory data via the FastAPI backend. */
 class HttpUrlProjectRepository(
     private val api: ProjectApi = HttpUrlProjectApi(InvestigationBackendConfig.resolveBaseUrl()),
 ) : ProjectRepository {
@@ -45,6 +52,9 @@ class HttpUrlProjectRepository(
 
   override suspend fun getProjectOverview(projectId: String): ProjectOverview =
       api.getProjectOverview(projectId)
+
+  override suspend fun createProject(request: NewProjectRequest): ProjectSummary =
+      api.createProject(request)
 }
 
 /**
@@ -54,7 +64,7 @@ class HttpUrlProjectRepository(
  * HttpUrlProjectRepository is now the production source for Projects Home.
  */
 class MockProjectRepository : ProjectRepository {
-  private val overviews: Map<String, ProjectOverview> =
+  private val overviews: MutableMap<String, ProjectOverview> =
       listOf(
               ProjectOverview(
                   project = ProjectSummary(
@@ -94,9 +104,24 @@ class MockProjectRepository : ProjectRepository {
               ),
           )
           .associateBy { it.project.projectId }
+          .toMutableMap()
 
   override suspend fun listProjects(): List<ProjectSummary> = overviews.values.map { it.project }
 
   override suspend fun getProjectOverview(projectId: String): ProjectOverview =
       overviews[projectId] ?: throw NoSuchElementException("No mock project state for $projectId")
+
+  override suspend fun createProject(request: NewProjectRequest): ProjectSummary {
+    val projectId = "mock-${overviews.size + 1}-${request.name.lowercase().replace(" ", "-")}"
+    val summary = ProjectSummary(projectId = projectId, name = request.name, status = "active")
+    overviews[projectId] = ProjectOverview(
+        project = summary,
+        checkpoint = ProjectCheckpoint(
+            whereWeLeftOff = null,
+            nextAction = request.nextAction,
+        ),
+        recentActivity = emptyList(),
+    )
+    return summary
+  }
 }

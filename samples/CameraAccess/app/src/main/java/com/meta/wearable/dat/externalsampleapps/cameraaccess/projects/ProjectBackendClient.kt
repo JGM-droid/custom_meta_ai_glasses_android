@@ -10,15 +10,16 @@
 //
 // Mirrors investigation/InvestigationBackendClient.kt's HttpURLConnection conventions (same
 // request/response/error-parsing shape, same backend error contract:
-// {"detail": {"category": ..., "message": ...}}) applied to the read-only Project endpoints this
-// slice needs:
-//   GET /projects                         -> list[ProjectSummary]
-//   GET /projects/{project_id}             -> Project (identity + checkpoint)
-//   GET /projects/{project_id}/activities  -> list[ProjectActivity]
+// {"detail": {"category": ..., "message": ...}}) applied to the Project endpoints this app uses:
+//   GET  /projects                         -> list[ProjectSummary]
+//   GET  /projects/{project_id}             -> Project (identity + checkpoint)
+//   GET  /projects/{project_id}/activities  -> list[ProjectActivity]
+//   POST /projects                          -> Project (create; the ONLY mutating call here)
 //
 // This is a standalone client, not a refactor of the Investigation client - the Investigation
-// networking code is left untouched. Read-only: no POST/PATCH/PUT/DELETE calls exist here, so
-// this client can never mutate backend Project Memory.
+// networking code is left untouched. createProject sends exactly the backend's
+// ProjectCreateRequest shape (name, goal, optional checkpoint.current_objective/next_action) -
+// no invented fields, no second creation model.
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.projects
 
@@ -33,6 +34,8 @@ interface ProjectApi {
   suspend fun listProjects(): List<ProjectSummary>
 
   suspend fun getProjectOverview(projectId: String): ProjectOverview
+
+  suspend fun createProject(request: NewProjectRequest): ProjectSummary
 }
 
 internal class ProjectApiException(val code: Int, val category: String, override val message: String) :
@@ -72,6 +75,21 @@ internal class HttpUrlProjectApi(
     return ProjectOverview(project = summary, checkpoint = checkpoint, recentActivity = recentActivity)
   }
 
+  override suspend fun createProject(request: NewProjectRequest): ProjectSummary {
+    val checkpointJson = JSONObject().apply {
+      request.currentObjective?.let { put("current_objective", it) }
+      request.nextAction?.let { put("next_action", it) }
+    }
+    val bodyJson = JSONObject().apply {
+      put("name", request.name)
+      put("goal", request.goal)
+      if (checkpointJson.length() > 0) put("checkpoint", checkpointJson)
+    }
+
+    val response = executeJsonObject(path = "/projects", method = "POST", body = bodyJson.toString())
+    return response.toProjectSummary()
+  }
+
   private fun JSONObject.toProjectSummary(): ProjectSummary =
       ProjectSummary(
           projectId = getString("project_id"),
@@ -85,24 +103,29 @@ internal class HttpUrlProjectApi(
     return value.ifBlank { null }
   }
 
-  private fun executeJsonObject(path: String): JSONObject {
-    val connection = openConnection(path)
-    return connection.useJsonResponse { body -> JSONObject(body) }
+  private fun executeJsonObject(path: String, method: String = "GET", body: String? = null): JSONObject {
+    val connection = openConnection(path, method = method, body = body)
+    return connection.useJsonResponse { responseBody -> JSONObject(responseBody) }
   }
 
   private fun executeJsonArray(path: String): JSONArray {
     val connection = openConnection(path)
-    return connection.useJsonResponse { body -> JSONArray(body) }
+    return connection.useJsonResponse { responseBody -> JSONArray(responseBody) }
   }
 
-  private fun openConnection(path: String): HttpURLConnection {
+  private fun openConnection(path: String, method: String = "GET", body: String? = null): HttpURLConnection {
     val url = URL("${baseUrl.trimEnd('/')}$path")
     return connectionFactory(url).apply {
-      requestMethod = "GET"
+      requestMethod = method
       connectTimeout = 15_000
       readTimeout = 15_000
       doInput = true
       useCaches = false
+      if (body != null) {
+        doOutput = true
+        setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        outputStream.use { output -> output.write(body.toByteArray(StandardCharsets.UTF_8)) }
+      }
     }
   }
 

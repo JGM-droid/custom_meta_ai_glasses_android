@@ -107,6 +107,11 @@ fun AppRoot(
     TopLevelScreen.NewProject ->
         NewProjectScreen(
             onBack = { topLevelScreen = TopLevelScreen.ProjectsHome },
+            // Navigate straight to the backend-created Project's real Project Detail - never
+            // back to Projects Home first. ProjectsHomeScreen refreshes itself from the backend
+            // whenever it re-enters composition, so the new Project appears there too without
+            // this screen needing to inject it into any shared/cached list.
+            onCreated = { project -> topLevelScreen = TopLevelScreen.ProjectDetail(project) },
             modifier = modifier,
         )
     TopLevelScreen.Capture ->

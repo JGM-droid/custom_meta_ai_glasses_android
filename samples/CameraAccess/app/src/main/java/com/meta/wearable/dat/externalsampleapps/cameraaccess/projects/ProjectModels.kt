@@ -51,3 +51,16 @@ data class ProjectOverview(
     val checkpoint: ProjectCheckpoint,
     val recentActivity: List<ProjectActivityEntry>,
 )
+
+/**
+ * A new Project to create - mirrors the backend's ProjectCreateRequest exactly (name/goal
+ * required, checkpoint.current_objective/next_action optional). No other backend
+ * ProjectCreateRequest/ProjectCheckpoint fields are exposed here - the create form is
+ * deliberately minimal.
+ */
+data class NewProjectRequest(
+    val name: String,
+    val goal: String,
+    val currentObjective: String? = null,
+    val nextAction: String? = null,
+)

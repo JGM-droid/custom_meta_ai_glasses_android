@@ -19,6 +19,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
@@ -45,8 +46,17 @@ import org.junit.runner.RunWith
  * - two distinct real backend projects show distinct identity in Project Overview, and opening
  *   one never shows another's identity (no cross-project leakage).
  * - "Continue Project" carries the selected (real) project into the workspace placeholder.
- * - "+ New Project" opens a placeholder, and back returns to Projects Home.
+ * - "+ New Project" opens a real creation form; back returns to Projects Home.
+ * - required-field validation fails without a backend round trip, and never leaves the Create
+ *   button stuck disabled - a failed attempt can be retried with the same button.
+ * - a successful creation calls the real POST /projects, navigates straight to that project's
+ *   own Project Detail (honest empty state, since no checkpoint fields were supplied), and the
+ *   new project is visible after returning to a freshly-refreshed Projects Home alongside the
+ *   projects that already existed.
  * - "Capture / Test Glasses" still reaches the existing, unmodified Meta camera/capture flow.
+ *
+ * Tests that create a Project use a timestamped unique name (see uniqueProjectName) so repeated
+ * physical-device runs never collide/confuse each other in the shared dev backend.
  *
  * Uses waitUntilExactlyOneExists(..., timeoutMillis=...) rather than bare assertExists() after a
  * click - the same pattern InstrumentationTest.kt already relies on - since immediate asserts
@@ -151,7 +161,7 @@ class AppRootTest {
   }
 
   @Test
-  fun tappingNewProjectOpensPlaceholderAndBackReturnsHome() {
+  fun tappingNewProjectOpensFormAndBackReturnsHome() {
     waitFor("+ New Project").performClick()
 
     waitFor("Create New Project")
@@ -159,6 +169,62 @@ class AppRootTest {
     waitFor("‹ Projects").performClick()
     waitFor("Project Assistant")
   }
+
+  @Test
+  fun requiredFieldValidationKeepsFormEditableForRetry() {
+    waitFor("+ New Project").performClick()
+    waitFor("Create New Project")
+
+    // Tap Create with everything blank - client-side validation, no backend round trip needed.
+    waitFor("Create Project").performClick()
+    waitForSubstring("required")
+
+    // The Create button must not be stuck disabled after a failed attempt - fill in the
+    // required fields and successfully retry with the SAME button.
+    val uniqueName = uniqueProjectName("Retry")
+    fillField("e.g. Garage Door Sensor", uniqueName)
+    fillField("What are you trying to accomplish?", "Prove the Create button survives a failed attempt.")
+    waitFor("Create Project").performClick()
+
+    waitForSubstring(uniqueName)
+  }
+
+  @Test
+  fun successfulCreationNavigatesToProjectDetailAndAppearsBackOnProjectsHome() {
+    waitForTag("project_row_0")
+    val previousTopProject = firstTextOf(composeTestRule.onNodeWithTag("project_row_0"))
+
+    val uniqueName = uniqueProjectName("Create")
+    val uniqueGoal = "Verify real project creation end to end from AppRootTest."
+
+    waitFor("+ New Project").performClick()
+    waitFor("Create New Project")
+    fillField("e.g. Garage Door Sensor", uniqueName)
+    fillField("What are you trying to accomplish?", uniqueGoal)
+    waitFor("Create Project").performClick()
+
+    // Navigates straight to the new (real, backend-created) Project's own Project Detail -
+    // never a placeholder, never another project's identity. No checkpoint fields were
+    // supplied, so the empty state must be honest, not fabricated.
+    waitForSubstring(uniqueName)
+    waitForSubstring("No current work recorded.")
+    waitForSubstring("No next action recorded.")
+    waitForSubstring("No recent activity.")
+
+    waitFor("‹ Projects").performClick()
+
+    // Projects Home refreshed from the backend: the new project is visible, and the
+    // previously-top project is still there too (existing Projects remain available).
+    waitForSubstring(uniqueName)
+    waitForSubstring(previousTopProject)
+  }
+
+  private fun fillField(placeholder: String, value: String) {
+    waitFor(placeholder).performTextInput(value)
+  }
+
+  private fun uniqueProjectName(label: String): String =
+      "AppRootTest $label ${System.currentTimeMillis()}"
 
   private fun waitFor(text: String) =
       composeTestRule

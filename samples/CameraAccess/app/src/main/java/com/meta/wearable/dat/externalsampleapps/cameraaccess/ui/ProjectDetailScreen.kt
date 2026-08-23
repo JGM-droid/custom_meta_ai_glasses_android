@@ -70,6 +70,11 @@ fun ProjectDetailScreen(
     modifier: Modifier = Modifier,
     viewModel: ProjectDetailViewModel =
         viewModel(
+            // Explicit per-project key (not Compose's default class-name-only key) - guarantees
+            // a fresh ViewModel/fetch for every distinct project_id, even across two projects
+            // opened back-to-back in the same Activity/ViewModelStore, rather than relying on
+            // this composable's call-site position to happen to disambiguate them.
+            key = project.projectId,
             factory =
                 ProjectDetailViewModel.Factory(
                     application = LocalContext.current.applicationContext as Application,

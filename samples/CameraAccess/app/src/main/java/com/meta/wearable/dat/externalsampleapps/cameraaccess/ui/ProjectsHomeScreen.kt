@@ -50,6 +50,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -80,6 +81,13 @@ fun ProjectsHomeScreen(
         ),
 ) {
   val uiState by viewModel.uiState.collectAsState()
+
+  // ProjectsViewModel is Activity-scoped (viewModel() retains it across AppRoot navigation), so
+  // its cached list would otherwise go stale after creating a Project elsewhere and returning
+  // here. Re-entering composition - which happens every time AppRoot switches back to this
+  // screen - is exactly the "returning to Projects Home" signal, so refresh from the backend
+  // then rather than trusting the old snapshot.
+  LaunchedEffect(Unit) { viewModel.loadProjects() }
 
   Column(
       modifier =

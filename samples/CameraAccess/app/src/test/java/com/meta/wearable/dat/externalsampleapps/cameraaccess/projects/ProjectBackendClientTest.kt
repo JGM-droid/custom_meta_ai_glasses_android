@@ -84,6 +84,119 @@ class ProjectBackendClientTest {
   }
 
   @Test
+  fun createProjectSendsCanonicalRequestBodyWithOptionalCheckpointFields() {
+    val recorder = RequestRecorder(
+        createdProjectResponseBody(
+            id = "44444444-4444-4444-4444-444444444444",
+            name = "Garage Door Sensor Test",
+            status = "active",
+        ),
+        code = 201,
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    runBlockingTest {
+      api.createProject(
+          NewProjectRequest(
+              name = "Garage Door Sensor Test",
+              goal = "Determine why the garage door sensor intermittently reports an obstruction.",
+              currentObjective = "Inspect sensor alignment and wiring.",
+              nextAction = "Capture photos of both safety sensors.",
+          ),
+      )
+    }
+
+    assertEquals("POST", recorder.connection.requestMethod)
+    assertEquals("/projects", recorder.connection.url.path)
+    assertEquals(
+        "application/json; charset=utf-8",
+        recorder.connection.customHeaders["Content-Type"],
+    )
+
+    val sentBody = org.json.JSONObject(recorder.connection.output.toString(StandardCharsets.UTF_8.name()))
+    assertEquals("Garage Door Sensor Test", sentBody.getString("name"))
+    assertEquals(
+        "Determine why the garage door sensor intermittently reports an obstruction.",
+        sentBody.getString("goal"),
+    )
+    // No extra top-level fields - matches the backend's ProjectCreateRequest exactly
+    // (extra="forbid"): name, goal, checkpoint only (status is omitted, defaults server-side).
+    assertEquals(setOf("name", "goal", "checkpoint"), sentBody.keyNames())
+
+    val checkpoint = sentBody.getJSONObject("checkpoint")
+    assertEquals("Inspect sensor alignment and wiring.", checkpoint.getString("current_objective"))
+    assertEquals("Capture photos of both safety sensors.", checkpoint.getString("next_action"))
+    assertEquals(setOf("current_objective", "next_action"), checkpoint.keyNames())
+  }
+
+  @Test
+  fun createProjectOmitsCheckpointKeyWhenNoOptionalFieldsProvided() {
+    val recorder = RequestRecorder(
+        createdProjectResponseBody(id = "55555555-5555-5555-5555-555555555555", name = "Minimal Project", status = "active"),
+        code = 201,
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    runBlockingTest {
+      api.createProject(NewProjectRequest(name = "Minimal Project", goal = "Just a goal.", currentObjective = null, nextAction = null))
+    }
+
+    val sentBody = org.json.JSONObject(recorder.connection.output.toString(StandardCharsets.UTF_8.name()))
+    assertEquals(setOf("name", "goal"), sentBody.keyNames())
+  }
+
+  @Test
+  fun createProjectParsesResponseAndPreservesCanonicalProjectId() {
+    val recorder = RequestRecorder(
+        createdProjectResponseBody(id = "66666666-6666-6666-6666-666666666666", name = "Garage Door Sensor Test", status = "active"),
+        code = 201,
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    val created = runBlockingTest {
+      api.createProject(NewProjectRequest(name = "Garage Door Sensor Test", goal = "Goal.", currentObjective = null, nextAction = null))
+    }
+
+    // The exact backend-assigned project_id must come back unchanged - never a client-generated
+    // id, never the request's own data reflected back without the server's canonical identity.
+    assertEquals("66666666-6666-6666-6666-666666666666", created.projectId)
+    assertEquals("Garage Door Sensor Test", created.name)
+    assertEquals("active", created.status)
+  }
+
+  @Test
+  fun createProjectValidationErrorThrowsWithBackendCategory() {
+    val recorder = RequestRecorder(
+        body = """{"detail":{"category":"validation_error","message":"name: field required"}}""",
+        code = 422,
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    try {
+      runBlockingTest { api.createProject(NewProjectRequest(name = "", goal = "Goal.")) }
+      fail("Expected ProjectApiException")
+    } catch (exc: ProjectApiException) {
+      assertEquals(422, exc.code)
+      assertEquals("validation_error", exc.category)
+    }
+  }
+
+  @Test
+  fun createProjectNetworkFailurePropagatesRatherThanCrashing() {
+    val api = HttpUrlProjectApi(
+        baseUrl = "http://10.0.2.2:8001",
+        connectionFactory = { throw java.io.IOException("Unable to resolve host") },
+    )
+
+    try {
+      runBlockingTest { api.createProject(NewProjectRequest(name = "X", goal = "Y")) }
+      fail("Expected an IOException to propagate")
+    } catch (exc: java.io.IOException) {
+      assertEquals("Unable to resolve host", exc.message)
+    }
+  }
+
+  @Test
   fun notFoundResponseThrowsWithBackendErrorCategory() {
     val recorder = RequestRecorder(
         body = """{"detail":{"category":"project_not_found","message":"Project does not exist."}}""",
@@ -112,9 +225,14 @@ private class RequestRecorder(private val body: String, private val code: Int = 
 }
 
 private class RecordingConnection(url: URL, private val body: String, private val code: Int) : HttpURLConnection(url) {
-  private val output = ByteArrayOutputStream()
+  val output = ByteArrayOutputStream()
+  val customHeaders = linkedMapOf<String, String>()
 
-  override fun setRequestProperty(key: String?, value: String?) {}
+  override fun setRequestProperty(key: String?, value: String?) {
+    if (key != null && value != null) {
+      customHeaders[key] = value
+    }
+  }
 
   override fun getOutputStream(): ByteArrayOutputStream = output
 
@@ -165,6 +283,29 @@ private fun getProjectResponseBody(id: String, currentWork: String?, nextAction:
       """.trimIndent()
 }
 
+private fun createdProjectResponseBody(id: String, name: String, status: String): String =
+    """
+    {
+      "schema_version":"1.0",
+      "project_id":"$id",
+      "name":"$name",
+      "goal":"Determine why the garage door sensor intermittently reports an obstruction.",
+      "status":"$status",
+      "checkpoint":{
+        "current_objective":"Inspect sensor alignment and wiring.",
+        "completed_summary":null,
+        "discoveries_summary":null,
+        "current_work":null,
+        "stopped_at":null,
+        "blockers":null,
+        "next_action":"Capture photos of both safety sensors."
+      },
+      "revision":0,
+      "created_at_utc":"2026-08-22T22:00:00Z",
+      "updated_at_utc":"2026-08-22T22:00:00Z"
+    }
+    """.trimIndent()
+
 private fun emptyActivitiesResponseBody(): String = "[]"
 
 private fun activitiesResponseBody(count: Int): String {
@@ -190,4 +331,11 @@ private fun activitiesResponseBody(count: Int): String {
 
 private fun <T> runBlockingTest(block: suspend () -> T): T {
   return kotlinx.coroutines.runBlocking { block() }
+}
+
+private fun org.json.JSONObject.keyNames(): Set<String> {
+  val result = mutableSetOf<String>()
+  val iterator = keys()
+  while (iterator.hasNext()) result.add(iterator.next())
+  return result
 }
