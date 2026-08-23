@@ -28,4 +28,5 @@ object AppColor {
   val Accent = Color(0xFF8EA1FF)
   val AccentInk = Color(0xFF11131C)
   val Success = Color(0xFF7FD9AC)
+  val Amber = Color(0xFFE8B04B)
 }

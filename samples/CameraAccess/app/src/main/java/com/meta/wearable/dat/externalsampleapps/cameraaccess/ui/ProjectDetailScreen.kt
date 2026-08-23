@@ -185,8 +185,10 @@ fun ProjectDetailScreen(
 // Project") - never exposes backend terminology like ActiveProjectPointer. isActive reflects
 // whether THIS viewed project is the backend's one Active Project; it is never assumed true just
 // because the user opened this screen (VIEWING a project never implies it is ACTIVE).
+// Not private: reused as-is by ProjectWorkspaceScreen so Workspace's Active Project control can
+// never drift from Project Detail's - see the Project Workspace v1 slice.
 @Composable
-private fun ActiveProjectControl(
+internal fun ActiveProjectControl(
     isActive: Boolean,
     actionState: ActiveProjectActionState,
     onWorkOnProject: () -> Unit,
@@ -277,8 +279,10 @@ private fun StatusPill(status: String, modifier: Modifier = Modifier) {
   }
 }
 
+// Not private: reused as-is by ProjectWorkspaceScreen for Where We Left Off / Next Action so the
+// two screens can never render the same checkpoint fields with visually different treatment.
 @Composable
-private fun ProjectSection(title: String, body: String, modifier: Modifier = Modifier) {
+internal fun ProjectSection(title: String, body: String, modifier: Modifier = Modifier) {
   Column(modifier = modifier.padding(top = 20.dp)) {
     Text(
         text = title.uppercase(),

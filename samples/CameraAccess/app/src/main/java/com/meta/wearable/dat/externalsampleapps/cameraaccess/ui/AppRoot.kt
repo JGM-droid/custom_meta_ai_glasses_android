@@ -69,9 +69,11 @@ fun AppRoot(
   var topLevelScreen by remember { mutableStateOf<TopLevelScreen>(TopLevelScreen.ProjectsHome) }
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-  // Same "don't strand an active stream" rule as the visible back control below, applied to the
-  // Android system Back button/gesture too.
-  val canGoBackToProjectsHome =
+  // Same "don't strand an active stream" rule as the visible back controls below, applied to the
+  // Android system Back button/gesture too. One step back per screen - Workspace steps to that
+  // same Project's Detail (never straight home), matching its own visible "‹ Overview" control,
+  // so the system gesture and the on-screen button always agree.
+  val canGoBack =
       when (topLevelScreen) {
         TopLevelScreen.ProjectsHome -> false
         TopLevelScreen.Capture -> !uiState.isStreaming
@@ -79,8 +81,12 @@ fun AppRoot(
         is TopLevelScreen.ProjectDetail -> true
         is TopLevelScreen.ProjectWorkspace -> true
       }
-  BackHandler(enabled = canGoBackToProjectsHome) {
-    topLevelScreen = TopLevelScreen.ProjectsHome
+  BackHandler(enabled = canGoBack) {
+    topLevelScreen =
+        when (val screen = topLevelScreen) {
+          is TopLevelScreen.ProjectWorkspace -> TopLevelScreen.ProjectDetail(screen.project)
+          else -> TopLevelScreen.ProjectsHome
+        }
   }
 
   when (val screen = topLevelScreen) {
@@ -101,7 +107,12 @@ fun AppRoot(
     is TopLevelScreen.ProjectWorkspace ->
         ProjectWorkspaceScreen(
             project = screen.project,
-            onBack = { topLevelScreen = TopLevelScreen.ProjectsHome },
+            // Steps back to THIS SAME Project's Detail/Overview, not straight to Projects Home -
+            // matches the system Back gesture above and the product flow's own "Back should
+            // return appropriately" requirement. screen.project (not a lookup) keeps identity
+            // explicit, so this can never land on the wrong Project's Detail.
+            onBack = { topLevelScreen = TopLevelScreen.ProjectDetail(screen.project) },
+            onOpenCapture = { topLevelScreen = TopLevelScreen.Capture },
             modifier = modifier,
         )
     TopLevelScreen.NewProject ->

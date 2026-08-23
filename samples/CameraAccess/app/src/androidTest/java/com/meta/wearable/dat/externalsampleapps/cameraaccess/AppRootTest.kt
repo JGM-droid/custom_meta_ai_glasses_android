@@ -12,6 +12,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -25,7 +26,13 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.nio.charset.StandardCharsets
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -47,7 +54,7 @@ import org.junit.runner.RunWith
  *   explicit empty/error state - never the old hardcoded four-project placeholder list).
  * - two distinct real backend projects show distinct identity in Project Overview, and opening
  *   one never shows another's identity (no cross-project leakage).
- * - "Continue Project" carries the selected (real) project into the workspace placeholder.
+ * - "Continue Project" carries the selected (real) project into the real Project Workspace.
  * - "+ New Project" opens a real creation form; back returns to Projects Home.
  * - required-field validation fails without a backend round trip, and never leaves the Create
  *   button stuck disabled - a failed attempt can be retried with the same button.
@@ -74,6 +81,26 @@ import org.junit.runner.RunWith
  * tests always drive every Active-state transition they depend on explicitly through the UI
  * (never assuming "nothing is Active" as a starting condition) and identify projects/rows by the
  * unique name each test itself created, never by an assumption about the ambient global state.
+ *
+ * Project Workspace v1 ("Continue Project" -> the real Workspace, not the old placeholder):
+ * - Continue Project opens Workspace for the exact canonical project_id that was tapped, and
+ *   Workspace's own real Where We Left Off / Next Action / Active Project / Recent Activity all
+ *   come from that same project - covered together with the required-empty-state and
+ *   real-next_action-rendering proof in workspaceOpensForCorrectProjectWithRealDataAndBackReturnsToOverview.
+ * - Draft composer text is proven NOT to reach the backend by reading the Project's raw
+ *   checkpoint straight from the backend (a plain GET, via fetchProjectJson below) after typing
+ *   into the composer and making the Project Active from Workspace - see
+ *   workingOnProjectFromWorkspaceAndDraftTextNeverMutatesBackendCheckpoint.
+ * - Project isolation and reaching Capture from Workspace (a new entry point this slice adds) are
+ *   covered in workspaceProjectIsolationAndCaptureReachableFromWorkspace.
+ * - "Real Where We Left Off (checkpoint.current_work) renders" is NOT independently
+ *   live-instrumented here: Android has no reachable path to set current_work (the create form
+ *   only ever sets current_objective/next_action - see NewProjectRequest), and Workspace renders
+ *   it via the exact same ProjectSection composable and ProjectDetailViewModel/overview.checkpoint
+ *   field Project Detail already uses. Non-null current_work -> whereWeLeftOff mapping is already
+ *   directly proven by ProjectBackendClientTest.kt's JVM tests (e.g.
+ *   twoDifferentProjectsProduceDistinctOverviews); this file proves the honest-empty-state case
+ *   live instead, which real Workspace usage will exercise for every brand-new Project.
  *
  * Tests that create a Project use a timestamped unique name (see uniqueProjectName) so repeated
  * physical-device runs never collide/confuse each other in the shared dev backend.
@@ -166,15 +193,23 @@ class AppRootTest {
   }
 
   @Test
-  fun continueProjectCarriesTheSelectedRealProjectIntoTheWorkspacePlaceholder() {
+  fun continueProjectCarriesTheSelectedRealProjectIntoWorkspace() {
     waitForTag("project_row_0")
     val name = firstTextOf(composeTestRule.onNodeWithTag("project_row_0"))
 
     composeTestRule.onNodeWithTag("project_row_0").performClick()
     waitFor("Continue Project").performClick()
 
-    waitForSubstring("Project Workspace")
+    // Real Workspace (Project Workspace v1), not the old placeholder - shows this Project's own
+    // identity via the composer/back control, never a hardcoded "Project Workspace" label.
     waitForSubstring(name)
+    waitFor("‹ Overview")
+    composeTestRule.onNodeWithText("Continue Project").assertDoesNotExist()
+
+    // Back steps to this Project's own Detail/Overview first - not straight to Projects Home.
+    waitFor("‹ Overview").performClick()
+    waitForSubstring(name)
+    waitFor("Continue Project")
 
     waitFor("‹ Projects").performClick()
     waitFor("Project Assistant")
@@ -335,14 +370,141 @@ class AppRootTest {
     )
   }
 
+  @Test
+  fun workspaceOpensForCorrectProjectWithRealDataAndBackReturnsToOverview() {
+    val name = uniqueProjectName("Workspace")
+    val nextAction = "Verify $name's real next_action renders in Workspace."
+    createProjectFromProjectsHome(name, "Prove Project Workspace v1 shows this Project's real state.", nextAction = nextAction)
+
+    // Landed on this Project's own Detail (existing creation flow) - Continue into Workspace.
+    waitForSubstring(name)
+    waitFor("Continue Project").performClick()
+
+    // Same canonical Project, real data, no fabricated example state.
+    waitForSubstring(name)
+    waitForSubstring(nextAction)
+    waitForSubstring("No current work recorded.")
+    waitForSubstring("No recent activity.")
+    // Brand new - never automatically Active (reuses the existing Active Project implementation).
+    waitFor("Work on this Project")
+    composeTestRule.onNodeWithText("Active Project").assertDoesNotExist()
+
+    // The composer accepts and EDITS draft text (two inputs, not just one write).
+    val composer = composeTestRule.onNodeWithTag("workspace_composer_input")
+    composer.performTextInput("Checking the ")
+    composer.performTextInput("wiring harness.")
+    composer.assertTextContains("Checking the wiring harness.", substring = true)
+
+    // Back returns to THIS Project's own Overview/Detail - not straight to Projects Home.
+    waitFor("‹ Overview").performClick()
+    waitForSubstring(name)
+    waitFor("Continue Project")
+    composeTestRule.onNodeWithText("‹ Overview").assertDoesNotExist()
+  }
+
+  @Test
+  fun workingOnProjectFromWorkspaceAndDraftTextNeverMutatesBackendCheckpoint() {
+    val name = uniqueProjectName("WorkspaceActive")
+    createProjectFromProjectsHome(name, "Prove Active Project and draft text both behave correctly from Workspace.")
+    val projectId = mostRecentlyCreatedProjectId()
+
+    waitFor("Continue Project").performClick()
+    waitForSubstring(name)
+
+    // Reuses the exact same Active Project control Project Detail uses - proven live from
+    // Workspace specifically, not just by code inspection.
+    waitFor("Work on this Project").performClick()
+    waitFor("Active Project")
+    waitFor("Stop Working on Project")
+
+    // Type draft text but never submit it anywhere - there is nothing to submit to yet.
+    composeTestRule.onNodeWithTag("workspace_composer_input").performTextInput("Draft note that must never reach the backend.")
+
+    // Read the Project straight from the backend: Active is real, but checkpoint.current_work
+    // (the only field this draft text could possibly have mutated) is still exactly what it was
+    // when the Project was created - null. Draft text truly never left this screen.
+    val backendProject = fetchProjectJson(projectId)
+    assertEquals(projectId, fetchActiveProjectId())
+    val checkpoint = backendProject.getJSONObject("checkpoint")
+    assertNull(
+        "Draft composer text must never mutate checkpoint.current_work",
+        checkpoint.opt("current_work")?.takeIf { it != JSONObject.NULL },
+    )
+  }
+
+  @Test
+  fun workspaceProjectIsolationAndCaptureReachableFromWorkspace() {
+    val nameA = uniqueProjectName("WorkspaceA")
+    val nameB = uniqueProjectName("WorkspaceB")
+    val nextActionB = "$nameB's own next action."
+
+    createProjectFromProjectsHome(nameA, "Project A for Workspace isolation.")
+    waitFor("Continue Project").performClick()
+    waitForSubstring(nameA)
+    waitFor("‹ Overview").performClick()
+    waitFor("‹ Projects").performClick()
+
+    createProjectFromProjectsHome(nameB, "Project B for Workspace isolation.", nextAction = nextActionB)
+    waitFor("Continue Project").performClick()
+
+    // B's own Workspace shows only B's identity/state - never A's.
+    waitForSubstring(nameB)
+    waitForSubstring(nextActionB)
+    composeTestRule.onNodeWithText(nameA, substring = true).assertDoesNotExist()
+
+    // Capture / Test Glasses is a new Workspace entry point this slice adds - prove it still
+    // reaches the real, unmodified Meta camera/capture flow, same as from Projects Home.
+    waitFor("Capture / Test Glasses").performClick()
+    val registerLabel = composeTestRule.activity.getString(R.string.register_button_title)
+    val streamTitle = composeTestRule.activity.getString(R.string.non_stream_screen_title)
+    waitForAnyOf(hasText(registerLabel), hasText(streamTitle))
+    composeTestRule.onNodeWithText("Capture / Test Glasses").assertDoesNotExist()
+  }
+
   /** Drives the full "+ New Project" form from Projects Home; leaves the caller on the new Project's Detail screen. */
-  private fun createProjectFromProjectsHome(name: String, goal: String) {
+  private fun createProjectFromProjectsHome(name: String, goal: String, nextAction: String? = null) {
     waitFor("+ New Project").performClick()
     waitFor("Create New Project")
     fillField("e.g. Garage Door Sensor", name)
     fillField("What are you trying to accomplish?", goal)
+    if (nextAction != null) {
+      fillField("What's the next concrete step?", nextAction)
+    }
     waitFor("Create Project").performClick()
     waitForSubstring(name)
+  }
+
+  /** The project_id of the most recently created/updated backend Project (see ProjectStore.list_projects sort order) - called immediately after createProjectFromProjectsHome, before any other Project is touched. */
+  private fun mostRecentlyCreatedProjectId(): String {
+    val projectsJson = fetchJsonArray("${resolvedBackendBaseUrl()}/projects")
+    return projectsJson.getJSONObject(0).getString("project_id")
+  }
+
+  private fun fetchActiveProjectId(): String? {
+    val connection = openTestConnection("${resolvedBackendBaseUrl()}/projects/active")
+    if (connection.responseCode == 404) return null
+    return JSONObject(connection.inputStream.use { it.readBytes().toString(StandardCharsets.UTF_8) }).getString("project_id")
+  }
+
+  private fun fetchProjectJson(projectId: String): JSONObject =
+      JSONObject(openTestConnection("${resolvedBackendBaseUrl()}/projects/$projectId").inputStream.use {
+        it.readBytes().toString(StandardCharsets.UTF_8)
+      })
+
+  private fun fetchJsonArray(url: String) =
+      org.json.JSONArray(openTestConnection(url).inputStream.use { it.readBytes().toString(StandardCharsets.UTF_8) })
+
+  private fun openTestConnection(url: String): HttpURLConnection {
+    val connection = URL(url).openConnection() as HttpURLConnection
+    connection.connectTimeout = 10_000
+    connection.readTimeout = 10_000
+    return connection
+  }
+
+  /** The same base URL resolution the app itself uses (BuildConfig.INVESTIGATION_BACKEND_BASE_URL, trimmed, with the app's own emulator-default fallback) - read-only verification calls only, never used to seed data. */
+  private fun resolvedBackendBaseUrl(): String {
+    val raw = BuildConfig.INVESTIGATION_BACKEND_BASE_URL.trim()
+    return raw.ifEmpty { "http://10.0.2.2:8001" }
   }
 
   /** Scans project_row_0..N on the CURRENT Projects Home composition for the row whose name matches. */
