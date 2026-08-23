@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -138,12 +139,17 @@ fun CameraAccessScaffold(
         }
 
         if (uiState.isDebugMenuVisible) {
+          // No explicit size modifier here - ModalBottomSheet already sizes itself to the
+          // available screen height. Forcing Modifier.fillMaxSize() on the sheet itself breaks
+          // Material3's internal intrinsic-height measurement pass (used to compute sheet
+          // anchors), which then measures this content with an infinite max-height constraint -
+          // and MockDeviceKitScreen's own Column(Modifier.verticalScroll(...)) below correctly
+          // rejects that. See MockDeviceKitScreenLayoutTest for regression coverage.
           ModalBottomSheet(
               onDismissRequest = { viewModel.hideDebugMenu() },
               sheetState = bottomSheetState,
-              modifier = Modifier.fillMaxSize(),
           ) {
-            MockDeviceKitScreen(modifier = Modifier.fillMaxSize(), sourceProjectId = sourceProjectId)
+            MockDeviceKitScreen(modifier = Modifier.fillMaxWidth(), sourceProjectId = sourceProjectId)
           }
         }
       }

@@ -20,6 +20,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -535,6 +536,27 @@ class AppRootTest {
     waitFor("‹ $nameB").performClick()
     waitForSubstring(nameB)
     waitFor("Continue Project")
+  }
+
+  @Test
+  fun debugMenuFromCaptureOpensMockDeviceKitWithoutCrashing() {
+    // Regression test for a Compose crash: MockDeviceKitScreen's own root
+    // Column(Modifier.verticalScroll(...)) used to wrap BackendInvestigationPanel, which has its
+    // OWN internal Column(Modifier.verticalScroll(...)) - a scrollable nested inside another
+    // scrollable. verticalScroll always measures its child with an infinite max-height
+    // constraint, so the inner one threw "Vertically scrollable component was measured with an
+    // infinity maximum height constraints" the instant this bottom sheet opened, taking the
+    // whole app down. See CameraAccessScaffold.kt/MockDeviceKitScreen.kt for the fix - this test
+    // proves the debug menu now opens and renders both sections without crashing.
+    waitFor("Capture / Test Glasses").performClick()
+    val registerLabel = composeTestRule.activity.getString(R.string.register_button_title)
+    val streamTitle = composeTestRule.activity.getString(R.string.non_stream_screen_title)
+    waitForAnyOf(hasText(registerLabel), hasText(streamTitle))
+
+    composeTestRule.onNodeWithContentDescription("Debug Menu").performClick()
+
+    waitFor("Mock Device Kit")
+    waitFor("INVESTIGATION")
   }
 
   @Test

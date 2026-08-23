@@ -31,8 +31,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.AlertDialog
@@ -93,8 +91,18 @@ fun MockDeviceKitScreen(
         ),
     )
 
+  // Deliberately not scrollable here (no Modifier.verticalScroll on this root Column):
+  // BackendInvestigationPanel below already wraps its own content in a
+  // Column(Modifier.verticalScroll(...)) - see BackendInvestigationPanel.kt. verticalScroll
+  // always measures its child with an infinite max-height constraint (to learn the child's full
+  // scrollable content height), so a second verticalScroll nested inside the first receives that
+  // infinite constraint and throws ("Vertically scrollable component was measured with an
+  // infinity maximum height constraints"). BackendInvestigationPanel's own scroll is already
+  // proven correct as the sole scrollable region of a ModalBottomSheet in StreamScreen.kt; giving
+  // it that same role here (rather than wrapping it in a second, redundant scrollable container)
+  // fixes the crash without changing BackendInvestigationPanel itself.
   Column(
-      modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+      modifier = modifier.padding(16.dp),
       verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     Card(
