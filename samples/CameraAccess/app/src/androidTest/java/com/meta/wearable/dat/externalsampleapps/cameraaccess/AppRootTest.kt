@@ -41,6 +41,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -108,8 +109,10 @@ import org.junit.runner.RunWith
  *   twoDifferentProjectsProduceDistinctOverviews); this file proves the honest-empty-state case
  *   live instead, which real Workspace usage will exercise for every brand-new Project.
  *
- * Tests that create a Project use a timestamped unique name (see uniqueProjectName) so repeated
- * physical-device runs never collide/confuse each other in the shared dev backend.
+ * Tests that create Projects are skipped unless the instrumentation run explicitly supplies
+ * `allow_project_backend_mutation=true`. This prevents ordinary test runs from writing disposable
+ * Projects into the configured persistent backend. Opted-in runs still use timestamped unique
+ * names (see uniqueProjectName) so their test records remain distinguishable.
  *
  * Uses waitUntilExactlyOneExists(..., timeoutMillis=...) rather than bare assertExists() after a
  * click - the same pattern InstrumentationTest.kt already relies on - since immediate asserts
@@ -250,6 +253,7 @@ class AppRootTest {
     val uniqueName = uniqueProjectName("Retry")
     fillField("e.g. Garage Door Sensor", uniqueName)
     fillField("What are you trying to accomplish?", "Prove the Create button survives a failed attempt.")
+    requireExplicitBackendMutationOptIn()
     waitFor("Create Project").performClick()
 
     waitForSubstring(uniqueName)
@@ -267,6 +271,7 @@ class AppRootTest {
     waitFor("Create New Project")
     fillField("e.g. Garage Door Sensor", uniqueName)
     fillField("What are you trying to accomplish?", uniqueGoal)
+    requireExplicitBackendMutationOptIn()
     waitFor("Create Project").performClick()
 
     // Navigates straight to the new (real, backend-created) Project's own Project Detail -
@@ -680,6 +685,7 @@ class AppRootTest {
 
   /** Drives the full "+ New Project" form from Projects Home; leaves the caller on the new Project's Detail screen. */
   private fun createProjectFromProjectsHome(name: String, goal: String, nextAction: String? = null) {
+    requireExplicitBackendMutationOptIn()
     waitFor("+ New Project").performClick()
     waitFor("Create New Project")
     fillField("e.g. Garage Door Sensor", name)
@@ -689,6 +695,16 @@ class AppRootTest {
     }
     waitFor("Create Project").performClick()
     waitForSubstring(name)
+  }
+
+  private fun requireExplicitBackendMutationOptIn() {
+    val allowed =
+        InstrumentationRegistry.getArguments().getString("allow_project_backend_mutation") == "true"
+    assumeTrue(
+        "Project-creating instrumentation tests require an isolated backend and explicit " +
+            "-e allow_project_backend_mutation true opt-in.",
+        allowed,
+    )
   }
 
   /** The project_id of the most recently created/updated backend Project (see ProjectStore.list_projects sort order) - called immediately after createProjectFromProjectsHome, before any other Project is touched. */
