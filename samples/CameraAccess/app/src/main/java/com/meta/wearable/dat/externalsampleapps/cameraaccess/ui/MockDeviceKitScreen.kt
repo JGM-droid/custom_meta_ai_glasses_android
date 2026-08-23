@@ -76,13 +76,20 @@ import com.meta.wearable.dat.mockdevice.api.camera.CameraFacing
 fun MockDeviceKitScreen(
     modifier: Modifier = Modifier,
     viewModel: MockDeviceKitViewModel = viewModel(LocalActivity.current as ComponentActivity),
+    // Explicit Project attribution carried in from AppRoot/CameraAccessScaffold when this debug
+    // screen is reached from within a Workspace-sourced Capture session (before streaming
+    // starts) - see CameraAccessScaffold.kt. Null for the existing global entry point.
+    sourceProjectId: String? = null,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val investigationViewModel: InvestigationSessionDebugViewModel =
     viewModel(
+      // Same stale-ViewModel precedent as StreamScreen.kt - see its comment.
+      key = sourceProjectId ?: "unscoped",
       factory =
         InvestigationSessionDebugViewModel.factory(
-          (LocalActivity.current as ComponentActivity).application,
+          application = (LocalActivity.current as ComponentActivity).application,
+          sourceProjectId = sourceProjectId,
         ),
     )
 

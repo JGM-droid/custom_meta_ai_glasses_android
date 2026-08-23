@@ -52,6 +52,8 @@ internal data class InvestigationSubmissionDraft(
     val evidence: List<InvestigationEvidenceInput>,
     val explanationText: String,
     val clientMetadata: Map<String, Any?>? = null,
+    // Explicit Project attribution for this submission - see BackendSessionCreateRequestDto.
+    val projectId: String? = null,
 )
 
 internal data class InvestigationSubmissionProgress(
@@ -97,8 +99,8 @@ internal class InvestigationSessionRepository(
 ) {
   private val submissionMutex = Mutex()
 
-  suspend fun createSession(clientMetadata: Map<String, Any?>? = null): BackendSessionDto {
-    return api.createSession(BackendSessionCreateRequestDto(clientMetadata = clientMetadata))
+  suspend fun createSession(clientMetadata: Map<String, Any?>? = null, projectId: String? = null): BackendSessionDto {
+    return api.createSession(BackendSessionCreateRequestDto(clientMetadata = clientMetadata, projectId = projectId))
   }
 
   suspend fun getSession(sessionId: String): BackendSessionDto {
@@ -128,7 +130,7 @@ internal class InvestigationSessionRepository(
       val explanation = draft.explanationText.trim()
 
       onProgress(InvestigationSubmissionProgress(clientState = InvestigationClientState.CREATING_SESSION))
-      session = createSession(draft.clientMetadata)
+      session = createSession(clientMetadata = draft.clientMetadata, projectId = draft.projectId)
 
         val totalImages = draft.evidence.size
       onProgress(
@@ -401,8 +403,8 @@ internal class InvestigationSessionRepository(
     }
   }
 
-  suspend fun checkConnectivity(clientMetadata: Map<String, Any?>? = null): BackendPollingResponseDto {
-    val session = createSession(clientMetadata)
+  suspend fun checkConnectivity(clientMetadata: Map<String, Any?>? = null, projectId: String? = null): BackendPollingResponseDto {
+    val session = createSession(clientMetadata = clientMetadata, projectId = projectId)
     return pollSession(session.sessionId)
   }
 

@@ -63,6 +63,9 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.Wearables
 internal fun StreamScreen(
     wearablesViewModel: WearablesViewModel,
     modifier: Modifier = Modifier,
+    // Explicit Project attribution carried in from Workspace via AppRoot/CameraAccessScaffold -
+    // see CameraAccessScaffold.kt. Null for the existing global Capture entry point.
+    sourceProjectId: String? = null,
     streamViewModel: StreamViewModel =
         viewModel(
             factory =
@@ -73,9 +76,17 @@ internal fun StreamScreen(
         ),
     investigationViewModel: InvestigationSessionDebugViewModel =
         viewModel(
+            // Keyed by sourceProjectId (not just the class name) so a Capture session entered
+            // from a different Project - or from the unscoped global entry point - always gets a
+            // fresh ViewModel rather than reusing a stale one still carrying a PREVIOUS
+            // sourceProjectId. Without this, Compose's default class-name-only key would let one
+            // Capture session's Project attribution leak into the next (the same class of bug
+            // already found and fixed for NewProjectViewModel in an earlier slice).
+            key = sourceProjectId ?: "unscoped",
             factory =
                 InvestigationSessionDebugViewModel.factory(
-                    (LocalActivity.current as ComponentActivity).application,
+                    application = (LocalActivity.current as ComponentActivity).application,
+                    sourceProjectId = sourceProjectId,
                 ),
         ),
 ) {

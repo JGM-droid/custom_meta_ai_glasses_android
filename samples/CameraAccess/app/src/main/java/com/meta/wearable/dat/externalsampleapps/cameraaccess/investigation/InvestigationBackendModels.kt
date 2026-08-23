@@ -61,10 +61,16 @@ internal enum class BackendEvidenceValidationStatus(val wireValue: String) {
 
 internal data class BackendSessionCreateRequestDto(
     val clientMetadata: Map<String, Any?>? = null,
+    // Explicit Project attribution (see docs/PROJECT_MEMORY_ARCHITECTURE.md ADR-037): when set,
+    // this always wins over the backend's own Active Project fallback; when omitted, the backend
+    // falls back to Active Project, then unscoped - exactly the existing, already-shipped
+    // precedence this client reuses as-is (no new endpoint, no new precedence logic here).
+    val projectId: String? = null,
 ) {
   fun toJsonObject(): JSONObject =
       JSONObject().apply {
         clientMetadata?.let { put("client_metadata", it.toJsonObject()) }
+        projectId?.let { put("project_id", it) }
       }
 }
 
@@ -182,6 +188,10 @@ internal data class BackendSessionDto(
     val latestAnalysisAttemptId: String?,
     val completedResultId: String?,
     val lastError: BackendSessionErrorMetadataDto?,
+    // The backend's own resolved attribution for this session (explicit project_id, Active
+    // Project fallback, or null/unscoped) - echoed back exactly as InvestigationSession.project_id
+    // reports it server-side, never recomputed/guessed client-side.
+    val projectId: String? = null,
 ) {
   fun toJsonObject(): JSONObject =
       JSONObject()
@@ -199,6 +209,7 @@ internal data class BackendSessionDto(
           .putNullable("latest_analysis_attempt_id", latestAnalysisAttemptId)
           .putNullable("completed_result_id", completedResultId)
           .putNullable("last_error", lastError?.toJsonObject())
+          .putNullable("project_id", projectId)
 
   companion object {
     fun fromJsonObject(json: JSONObject): BackendSessionDto {
@@ -217,6 +228,7 @@ internal data class BackendSessionDto(
           latestAnalysisAttemptId = json.optStringOrNull("latest_analysis_attempt_id"),
           completedResultId = json.optStringOrNull("completed_result_id"),
           lastError = json.optJSONObject("last_error")?.let(BackendSessionErrorMetadataDto::fromJsonObject),
+          projectId = json.optStringOrNull("project_id"),
       )
     }
   }

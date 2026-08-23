@@ -462,13 +462,79 @@ class AppRootTest {
     waitForSubstring(nextActionB)
     composeTestRule.onNodeWithText(nameA, substring = true).assertDoesNotExist()
 
-    // Capture / Test Glasses is a new Workspace entry point this slice adds - prove it still
-    // reaches the real, unmodified Meta camera/capture flow, same as from Projects Home.
+    // Capture / Test Glasses is a Workspace entry point - prove it still reaches the real,
+    // unmodified Meta camera/capture flow, same as from Projects Home, AND that it now carries
+    // B's own explicit Project context (Project-Scoped Glasses Capture slice) - never A's.
     waitFor("Capture / Test Glasses").performClick()
     val registerLabel = composeTestRule.activity.getString(R.string.register_button_title)
     val streamTitle = composeTestRule.activity.getString(R.string.non_stream_screen_title)
     waitForAnyOf(hasText(registerLabel), hasText(streamTitle))
     composeTestRule.onNodeWithText("Capture / Test Glasses").assertDoesNotExist()
+    waitForSubstring("Capturing for $nameB")
+    composeTestRule.onNodeWithText(nameA, substring = true).assertDoesNotExist()
+  }
+
+  @Test
+  fun captureFromWorkspaceBackNavigationReturnsToSourceProjectDetail() {
+    val name = uniqueProjectName("CaptureBack")
+    createProjectFromProjectsHome(name, "Prove Capture back-navigation returns to the source Project.")
+    waitFor("Continue Project").performClick()
+    waitForSubstring(name)
+
+    waitFor("Capture / Test Glasses").performClick()
+    waitForSubstring("Capturing for $name")
+
+    // The back control is labeled with the source Project (not the generic "‹ Projects" the
+    // unscoped global entry point uses) and returns to THAT Project's own Detail/Overview -
+    // never straight to Projects Home (Phase 10: preserve source Project context on return).
+    waitFor("‹ $name").performClick()
+    waitForSubstring(name)
+    waitFor("Continue Project")
+    composeTestRule.onNodeWithText("+ New Project").assertDoesNotExist()
+  }
+
+  @Test
+  fun globalCaptureFromProjectsHomeShowsNoProjectContextAndReturnsHome() {
+    waitFor("Capture / Test Glasses").performClick()
+    val registerLabel = composeTestRule.activity.getString(R.string.register_button_title)
+    val streamTitle = composeTestRule.activity.getString(R.string.non_stream_screen_title)
+    waitForAnyOf(hasText(registerLabel), hasText(streamTitle))
+
+    // The existing global entry point carries no explicit Project - no capture-context
+    // indicator, and the back control keeps its original, unchanged label/destination.
+    composeTestRule.onNodeWithText("Capturing for", substring = true).assertDoesNotExist()
+    waitFor("‹ Projects").performClick()
+    waitFor("Project Assistant")
+  }
+
+  @Test
+  fun captureProjectContextDoesNotLeakBetweenProjects() {
+    val nameA = uniqueProjectName("CaptureCtxA")
+    val nameB = uniqueProjectName("CaptureCtxB")
+
+    createProjectFromProjectsHome(nameA, "Project A for capture-context isolation.")
+    waitFor("Continue Project").performClick()
+    waitForSubstring(nameA)
+    waitFor("Capture / Test Glasses").performClick()
+    waitForSubstring("Capturing for $nameA")
+
+    // Back to Projects Home (via the unscoped-equivalent path is not available here - go via
+    // the source-Project back control, then Overview, then Projects Home).
+    waitFor("‹ $nameA").performClick()
+    waitFor("‹ Projects").performClick()
+
+    createProjectFromProjectsHome(nameB, "Project B for capture-context isolation.")
+    waitFor("Continue Project").performClick()
+    waitForSubstring(nameB)
+    waitFor("Capture / Test Glasses").performClick()
+
+    // B's own Capture context - never A's, even though A's Capture context was shown moments
+    // earlier in the same app session.
+    waitForSubstring("Capturing for $nameB")
+    composeTestRule.onNodeWithText(nameA, substring = true).assertDoesNotExist()
+    waitFor("‹ $nameB").performClick()
+    waitForSubstring(nameB)
+    waitFor("Continue Project")
   }
 
   @Test

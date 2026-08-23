@@ -101,6 +101,15 @@ internal data class InvestigationSessionDebugUiState(
 
 internal class InvestigationSessionDebugViewModel(
     application: Application,
+    // Explicit Project attribution for whatever this ViewModel instance submits (see
+    // BackendSessionCreateRequestDto/ADR-037) - null means the backend's own Active Project
+    // fallback/unscoped precedence applies unchanged, exactly matching the existing global
+    // Capture / Test Glasses entry point's behavior. Immutable for this ViewModel's lifetime: it
+    // is set once, at construction, from the explicit Project the caller navigated in from (see
+    // StreamScreen.kt's `key = sourceProjectId` on its viewModel() call) - never mutated later,
+    // so a single Capture session can never silently change which Project it belongs to partway
+    // through.
+    private val sourceProjectId: String? = null,
     private val repository: InvestigationSessionRepository = InvestigationSessionRepository(
         api = HttpUrlInvestigationSessionApi(InvestigationBackendConfig.resolveBaseUrl()),
     ),
@@ -108,12 +117,12 @@ internal class InvestigationSessionDebugViewModel(
   companion object {
     private const val SUBMISSION_TIMEOUT_MS = 120_000L
 
-    fun factory(application: Application): ViewModelProvider.Factory {
+    fun factory(application: Application, sourceProjectId: String? = null): ViewModelProvider.Factory {
       return object : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
           if (modelClass.isAssignableFrom(InvestigationSessionDebugViewModel::class.java)) {
-            return InvestigationSessionDebugViewModel(application) as T
+            return InvestigationSessionDebugViewModel(application, sourceProjectId) as T
           }
           throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
         }
@@ -256,6 +265,7 @@ internal class InvestigationSessionDebugViewModel(
                 "source" to "cameraaccess_debug",
                 "backend_base_url" to _uiState.value.backendBaseUrl,
               ),
+              projectId = sourceProjectId,
             )
           }
         _uiState.update {
@@ -478,6 +488,7 @@ internal class InvestigationSessionDebugViewModel(
             "source" to "cameraaccess_debug",
             "backend_base_url" to _uiState.value.backendBaseUrl,
         ),
+        projectId = sourceProjectId,
     )
   }
 

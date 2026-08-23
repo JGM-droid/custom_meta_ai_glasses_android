@@ -9,6 +9,56 @@ import java.time.Instant
 
 class InvestigationBackendModelsTest {
   @Test
+  fun sessionCreateRequestIncludesExplicitProjectId() {
+    val json = BackendSessionCreateRequestDto(projectId = "11111111-1111-1111-1111-111111111111").toJsonObject()
+
+    assertEquals("11111111-1111-1111-1111-111111111111", json.getString("project_id"))
+  }
+
+  @Test
+  fun sessionCreateRequestOmitsProjectIdKeyWhenNotExplicitlySet() {
+    // Omitted, not null - the backend falls back to Active Project / unscoped only when the
+    // key itself is absent (see ADR-037); Android must never invent a project_id for the
+    // existing global Capture entry point.
+    val json = BackendSessionCreateRequestDto(clientMetadata = mapOf("source" to "test")).toJsonObject()
+
+    assertFalse(json.has("project_id"))
+  }
+
+  @Test
+  fun sessionDtoParsesResolvedProjectIdFromBackendResponse() {
+    val json =
+        JSONObject()
+            .put("schema_version", "2.0")
+            .put("session_id", "123e4567-e89b-12d3-a456-426614174000")
+            .put("status", "created")
+            .put("revision", 0)
+            .put("created_at_utc", "2026-07-18T10:00:00Z")
+            .put("updated_at_utc", "2026-07-18T10:00:00Z")
+            .put("project_id", "22222222-2222-2222-2222-222222222222")
+
+    val dto = BackendSessionDto.fromJsonObject(json)
+
+    assertEquals("22222222-2222-2222-2222-222222222222", dto.projectId)
+  }
+
+  @Test
+  fun sessionDtoParsesNullProjectIdAsUnscoped() {
+    val json =
+        JSONObject()
+            .put("schema_version", "2.0")
+            .put("session_id", "123e4567-e89b-12d3-a456-426614174000")
+            .put("status", "created")
+            .put("revision", 0)
+            .put("created_at_utc", "2026-07-18T10:00:00Z")
+            .put("updated_at_utc", "2026-07-18T10:00:00Z")
+
+    val dto = BackendSessionDto.fromJsonObject(json)
+
+    assertEquals(null, dto.projectId)
+  }
+
+  @Test
   fun pollingResponseDeserializesNullableFields() {
     val json =
         JSONObject()

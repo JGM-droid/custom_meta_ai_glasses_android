@@ -65,6 +65,13 @@ fun CameraAccessScaffold(
     viewModel: WearablesViewModel,
     onRequestWearablesPermission: suspend (Permission) -> PermissionStatus,
     modifier: Modifier = Modifier,
+    // Explicit Project attribution carried in from AppRoot's TopLevelScreen.Capture(sourceProject)
+    // - see AppRoot.kt. Null for the existing global "Capture / Test Glasses" entry point from
+    // Projects Home, which is unaffected: this scaffold and everything inside it (HomeScreen,
+    // NonStreamScreen, StreamScreen, the DAT SDK state machine) render and behave exactly as
+    // before regardless of this value - it is only forwarded through to StreamScreen so an
+    // eventual Investigation submission can attribute to the right Project.
+    sourceProjectId: String? = null,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val snackbarHostState = remember { SnackbarHostState() }
@@ -84,6 +91,7 @@ fun CameraAccessScaffold(
         uiState.isStreaming ->
             StreamScreen(
                 wearablesViewModel = viewModel,
+                sourceProjectId = sourceProjectId,
             )
         uiState.isRegistered ->
             NonStreamScreen(
@@ -135,7 +143,7 @@ fun CameraAccessScaffold(
               sheetState = bottomSheetState,
               modifier = Modifier.fillMaxSize(),
           ) {
-            MockDeviceKitScreen(modifier = Modifier.fillMaxSize())
+            MockDeviceKitScreen(modifier = Modifier.fillMaxSize(), sourceProjectId = sourceProjectId)
           }
         }
       }

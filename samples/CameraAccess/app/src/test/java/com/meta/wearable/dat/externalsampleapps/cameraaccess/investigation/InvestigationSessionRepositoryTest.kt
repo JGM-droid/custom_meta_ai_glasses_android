@@ -86,6 +86,57 @@ class InvestigationSessionRepositoryTest {
   }
 
   @Test
+  fun submitInvestigationForwardsExplicitProjectIdToTheCreateSessionRequest() = runBlocking {
+    val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
+    val repository = InvestigationSessionRepository(api = api)
+
+    repository.submitInvestigation(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("one.jpg")),
+            explanationText = "Project-scoped capture",
+            projectId = "11111111-1111-1111-1111-111111111111",
+        ),
+    )
+
+    assertEquals("11111111-1111-1111-1111-111111111111", api.lastCreateRequest?.projectId)
+  }
+
+  @Test
+  fun submitInvestigationOmitsProjectIdWhenCaptureWasNotProjectScoped() = runBlocking {
+    // The existing global "Capture / Test Glasses" entry point: no explicit Project was
+    // navigated in from, so Android must never invent one - the backend's own Active Project
+    // fallback / unscoped precedence (ADR-037) is what decides attribution, not this client.
+    val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
+    val repository = InvestigationSessionRepository(api = api)
+
+    repository.submitInvestigation(
+        InvestigationSubmissionDraft(evidence = listOf(image("one.jpg")), explanationText = "Unscoped capture"),
+    )
+
+    assertEquals(null, api.lastCreateRequest?.projectId)
+  }
+
+  @Test
+  fun checkConnectivityForwardsExplicitProjectIdToTheCreateSessionRequest() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api)
+
+    repository.checkConnectivity(projectId = "11111111-1111-1111-1111-111111111111")
+
+    assertEquals("11111111-1111-1111-1111-111111111111", api.lastCreateRequest?.projectId)
+  }
+
+  @Test
+  fun checkConnectivityOmitsProjectIdWhenNotProjectScoped() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api)
+
+    repository.checkConnectivity()
+
+    assertEquals(null, api.lastCreateRequest?.projectId)
+  }
+
+  @Test
   fun brandNewSessionDoesNotPerformIllegalResumeTransition() = runBlocking {
     val api =
         FakeInvestigationSessionApi(
@@ -623,6 +674,8 @@ private class FakeInvestigationSessionApi(
 
   var createSessionCalls: Int = 0
     private set
+  var lastCreateRequest: BackendSessionCreateRequestDto? = null
+    private set
   var analyzeCalls: Int = 0
     private set
   var pollCalls: Int = 0
@@ -637,9 +690,10 @@ private class FakeInvestigationSessionApi(
   override suspend fun createSession(request: BackendSessionCreateRequestDto): BackendSessionDto {
     callTrace += "create"
     createSessionCalls += 1
+    lastCreateRequest = request
     createException?.let { throw it }
     currentSessionStatus = BackendSessionStatus.CREATED
-    return session(status = BackendSessionStatus.CREATED, revision = 0)
+    return session(status = BackendSessionStatus.CREATED, revision = 0, projectId = request.projectId)
   }
 
   override suspend fun getSession(sessionId: String): BackendSessionDto = session(status = currentSessionStatus)
@@ -728,6 +782,7 @@ private class FakeInvestigationSessionApi(
   private fun session(
       status: BackendSessionStatus,
       revision: Int = 1,
+      projectId: String? = null,
   ): BackendSessionDto {
     return BackendSessionDto(
         schemaVersion = "2.0",
@@ -744,6 +799,7 @@ private class FakeInvestigationSessionApi(
         latestAnalysisAttemptId = null,
         completedResultId = null,
         lastError = null,
+        projectId = projectId,
     )
   }
 

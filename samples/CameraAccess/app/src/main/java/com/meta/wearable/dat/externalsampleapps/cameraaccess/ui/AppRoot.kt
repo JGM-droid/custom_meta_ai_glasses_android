@@ -23,11 +23,23 @@
 // package - is carried in TopLevelScreen.ProjectDetail). This file itself makes no backend
 // calls and never mutates Project Memory; ProjectsHomeScreen/ProjectDetailScreen's own
 // ViewModels perform only read-only GET requests.
+//
+// Project-Scoped Glasses Capture: TopLevelScreen.Capture now optionally carries a
+// `sourceProject: ProjectSummary?` - the EXPLICIT Project context Capture was entered from, if
+// any. Entering Capture from a Project Workspace passes that Workspace's own project (screen.
+// project, never a lookup); entering from the existing global "Capture / Test Glasses" on
+// Projects Home passes null, preserving that entry point's existing unscoped/Active-Project-
+// fallback behavior exactly (see docs/PROJECT_MEMORY_ARCHITECTURE.md ADR-037, which the backend
+// already implements and this slice only threads the explicit id into). Carrying a project here
+// does NOT call setActiveProject() - viewing/capturing for a Project and that Project being
+// Active remain deliberately separate concepts, exactly as established for Workspace's own
+// Active Project control.
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -42,6 +54,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
@@ -57,7 +70,9 @@ private sealed interface TopLevelScreen {
 
   data class ProjectWorkspace(val project: ProjectSummary) : TopLevelScreen
 
-  data object Capture : TopLevelScreen
+  // sourceProject: the explicit Project Capture was entered from (Workspace), or null for the
+  // existing global entry point (Projects Home) - see file header.
+  data class Capture(val sourceProject: ProjectSummary? = null) : TopLevelScreen
 }
 
 @Composable
@@ -76,7 +91,7 @@ fun AppRoot(
   val canGoBack =
       when (topLevelScreen) {
         TopLevelScreen.ProjectsHome -> false
-        TopLevelScreen.Capture -> !uiState.isStreaming
+        is TopLevelScreen.Capture -> !uiState.isStreaming
         TopLevelScreen.NewProject -> true
         is TopLevelScreen.ProjectDetail -> true
         is TopLevelScreen.ProjectWorkspace -> true
@@ -85,6 +100,11 @@ fun AppRoot(
     topLevelScreen =
         when (val screen = topLevelScreen) {
           is TopLevelScreen.ProjectWorkspace -> TopLevelScreen.ProjectDetail(screen.project)
+          // Return toward the same Project context Capture was entered from, where practical
+          // (Phase 10) - the unscoped global entry point (sourceProject == null) keeps its
+          // existing "back to Projects Home" behavior exactly.
+          is TopLevelScreen.Capture ->
+              screen.sourceProject?.let { TopLevelScreen.ProjectDetail(it) } ?: TopLevelScreen.ProjectsHome
           else -> TopLevelScreen.ProjectsHome
         }
   }
@@ -92,7 +112,9 @@ fun AppRoot(
   when (val screen = topLevelScreen) {
     TopLevelScreen.ProjectsHome ->
         ProjectsHomeScreen(
-            onOpenCapture = { topLevelScreen = TopLevelScreen.Capture },
+            // The existing global entry point - no explicit Project (sourceProject = null), so
+            // the backend's own Active Project fallback / unscoped precedence applies unchanged.
+            onOpenCapture = { topLevelScreen = TopLevelScreen.Capture() },
             onOpenProject = { project -> topLevelScreen = TopLevelScreen.ProjectDetail(project) },
             onNewProject = { topLevelScreen = TopLevelScreen.NewProject },
             modifier = modifier,
@@ -112,7 +134,11 @@ fun AppRoot(
             // return appropriately" requirement. screen.project (not a lookup) keeps identity
             // explicit, so this can never land on the wrong Project's Detail.
             onBack = { topLevelScreen = TopLevelScreen.ProjectDetail(screen.project) },
-            onOpenCapture = { topLevelScreen = TopLevelScreen.Capture },
+            // Explicit Project context travels with the workflow (CORE SAFETY RULE): this
+            // Workspace's own canonical project - never a lookup, never the Active Project -
+            // becomes Capture's sourceProject, so it wins over Active Project no matter what is
+            // currently marked Active.
+            onOpenCapture = { topLevelScreen = TopLevelScreen.Capture(sourceProject = screen.project) },
             modifier = modifier,
         )
     TopLevelScreen.NewProject ->
@@ -125,26 +151,47 @@ fun AppRoot(
             onCreated = { project -> topLevelScreen = TopLevelScreen.ProjectDetail(project) },
             modifier = modifier,
         )
-    TopLevelScreen.Capture ->
+    is TopLevelScreen.Capture ->
         Box(modifier = modifier.fillMaxSize()) {
           CameraAccessScaffold(
               viewModel = viewModel,
               onRequestWearablesPermission = onRequestWearablesPermission,
+              sourceProjectId = screen.sourceProject?.projectId,
           )
 
-          // Only offer a way back to Projects Home while not actively streaming. Compose
-          // removing CameraAccessScaffold from composition does not stop an in-progress stream
+          // Only offer a way back while not actively streaming. Compose removing
+          // CameraAccessScaffold from composition does not stop an in-progress stream
           // (StreamViewModel is Activity-scoped, not composition-scoped), and StreamScreen's own
           // "Stop streaming" button is the existing, correct way to end a stream. Reusing
           // uiState.isStreaming (already observed by CameraAccessScaffold itself) lets this stay
           // safe without touching any protected file.
           if (!uiState.isStreaming) {
-            TextButton(
-                onClick = { topLevelScreen = TopLevelScreen.ProjectsHome },
-                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(12.dp),
-                colors = ButtonDefaults.textButtonColors(contentColor = AppColor.InkPrimary),
-            ) {
-              Text("‹ Projects")
+            Column(modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(12.dp)) {
+              TextButton(
+                  onClick = {
+                    // Return toward the same Project context Capture was entered from (Phase 10),
+                    // matching the system Back gesture above.
+                    topLevelScreen =
+                        screen.sourceProject?.let { TopLevelScreen.ProjectDetail(it) }
+                            ?: TopLevelScreen.ProjectsHome
+                  },
+                  colors = ButtonDefaults.textButtonColors(contentColor = AppColor.InkPrimary),
+              ) {
+                Text(if (screen.sourceProject != null) "‹ ${screen.sourceProject.name}" else "‹ Projects")
+              }
+
+              // Subtle capture-context indicator (Phase 6) - AppRoot-level overlay only, never
+              // touches CameraAccessScaffold/NonStreamScreen/StreamScreen, and never covers
+              // camera controls (only shown alongside the back control above, which is itself
+              // already hidden while streaming).
+              screen.sourceProject?.let { project ->
+                Text(
+                    text = "Capturing for ${project.name}",
+                    color = AppColor.InkSecondary,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(start = 12.dp, top = 2.dp),
+                )
+              }
             }
           }
         }
