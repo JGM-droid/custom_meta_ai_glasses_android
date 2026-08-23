@@ -76,6 +76,7 @@ class InvestigationPanelReopenContractTest {
     assertTrue(streamScreen.contains("!streamUiState.isInvestigationPanelVisible"))
     assertTrue(streamScreen.contains("hasActiveInvestigation(investigationUiState)"))
     assertTrue(streamScreen.contains("onClick = { streamViewModel.showInvestigationPanel() }"))
+    assertTrue(streamScreen.contains("Text(\"Resume ${'$'}investigationReopenLabel\")"))
   }
 
   @Test

@@ -97,6 +97,13 @@ internal data class InvestigationSessionDebugUiState(
     val statusMessage: String? = null,
     val canSubmit: Boolean = false,
     val isRunning: Boolean = false,
+    val trustDecisionInFlight: Boolean = false,
+    val trustDecision: BackendTrustDecision? = null,
+    val trustStatus: String? = null,
+    val trustMessage: String? = null,
+    val trustCorrectionText: String = "",
+    val continuationSessionId: String? = null,
+    val trustControlsAvailable: Boolean = false,
 )
 
 internal class InvestigationSessionDebugViewModel(
@@ -153,6 +160,89 @@ internal class InvestigationSessionDebugViewModel(
 
   fun setExplanationText(text: String) {
     _uiState.update { it.copy(explanationText = text) }
+  }
+
+  fun setTrustCorrectionText(text: String) {
+    _uiState.update { it.copy(trustCorrectionText = text) }
+  }
+
+  fun submitTrustDecision(decision: BackendTrustDecision) {
+    val projectId = sourceProjectId ?: return
+    val sessionId = _uiState.value.sessionId ?: return
+    if (_uiState.value.compactResult == null || activeJob?.isActive == true) {
+      return
+    }
+    activeJob =
+        viewModelScope.launch {
+          _uiState.update {
+            it.copy(
+                trustDecisionInFlight = true,
+                trustMessage = null,
+                backendErrorCategory = null,
+            )
+          }
+          try {
+            val response =
+                withContext(Dispatchers.IO) {
+                  repository.submitTrustDecision(
+                      projectId = projectId,
+                      sessionId = sessionId,
+                      decision = decision,
+                      correction = _uiState.value.trustCorrectionText,
+                  )
+                }
+            if (decision == BackendTrustDecision.MORE_EVIDENCE) {
+              val followUpId = response.followUpSessionId
+                  ?: throw IllegalStateException("Backend did not return a follow-up Investigation.")
+              _uiState.update {
+                InvestigationSessionDebugUiState(
+                    backendBaseUrl = it.backendBaseUrl,
+                    clientState = InvestigationClientState.IDLE,
+                    sessionId = followUpId,
+                    backendStatus = BackendSessionStatus.CREATED,
+                    continuationSessionId = followUpId,
+                    trustDecision = decision,
+                    trustStatus = response.status,
+                    trustMessage = "More evidence requested. Capture another view for this Project.",
+                )
+              }
+            } else {
+              val message =
+                  when (decision) {
+                    BackendTrustDecision.CONTINUE ->
+                        "Saved as a working hypothesis. Proposal status: ${response.checkpointProposalStatus ?: "pending"}; Project review is still required."
+                    BackendTrustDecision.DISAGREE ->
+                        "Disagreement saved. The original AI result remains unchanged."
+                    BackendTrustDecision.MORE_EVIDENCE -> error("handled above")
+                  }
+              _uiState.update {
+                it.copy(
+                    trustDecisionInFlight = false,
+                    trustDecision = decision,
+                    trustStatus = response.status,
+                    trustMessage = message,
+                )
+              }
+            }
+          } catch (error: BackendApiException) {
+            _uiState.update {
+              it.copy(
+                  trustDecisionInFlight = false,
+                  backendErrorCategory = error.error.category,
+                  trustMessage = error.error.message,
+              )
+            }
+          } catch (error: Exception) {
+            _uiState.update {
+              it.copy(
+                  trustDecisionInFlight = false,
+                  trustMessage = error.message ?: "Trust decision failed.",
+              )
+            }
+          } finally {
+            activeJob = null
+          }
+        }
   }
 
   fun setImage(slotIndex: Int, uriString: String?, displayName: String?) {
@@ -385,6 +475,10 @@ internal class InvestigationSessionDebugViewModel(
                   explanationPresent = outcome.polling.explanationPresent,
                   uploadedImageCount = it.totalImageCount,
                   statusMessage = "Investigation completed.",
+                  trustControlsAvailable = sourceProjectId != null,
+                  trustDecision = null,
+                  trustStatus = null,
+                  trustMessage = null,
               )
             }
           }
@@ -489,6 +583,7 @@ internal class InvestigationSessionDebugViewModel(
             "backend_base_url" to _uiState.value.backendBaseUrl,
         ),
         projectId = sourceProjectId,
+        continuationSessionId = _uiState.value.continuationSessionId,
     )
   }
 

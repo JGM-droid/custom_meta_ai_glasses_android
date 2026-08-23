@@ -54,6 +54,9 @@ internal data class InvestigationSubmissionDraft(
     val clientMetadata: Map<String, Any?>? = null,
     // Explicit Project attribution for this submission - see BackendSessionCreateRequestDto.
     val projectId: String? = null,
+    // Present only after the backend's More Evidence trust decision creates the canonical
+    // project-owned continuation session. Reusing it avoids inventing a second session.
+    val continuationSessionId: String? = null,
 )
 
 internal data class InvestigationSubmissionProgress(
@@ -111,6 +114,19 @@ internal class InvestigationSessionRepository(
     return api.pollSession(sessionId)
   }
 
+  suspend fun submitTrustDecision(
+      projectId: String,
+      sessionId: String,
+      decision: BackendTrustDecision,
+      correction: String? = null,
+  ): BackendTrustDecisionResponseDto {
+    return api.submitTrustDecision(
+        projectId = projectId,
+        sessionId = sessionId,
+        request = BackendTrustDecisionRequestDto(decision = decision, correction = correction),
+    )
+  }
+
   suspend fun submitInvestigation(
       draft: InvestigationSubmissionDraft,
       onProgress: (InvestigationSubmissionProgress) -> Unit = {},
@@ -130,7 +146,9 @@ internal class InvestigationSessionRepository(
       val explanation = draft.explanationText.trim()
 
       onProgress(InvestigationSubmissionProgress(clientState = InvestigationClientState.CREATING_SESSION))
-      session = createSession(clientMetadata = draft.clientMetadata, projectId = draft.projectId)
+      session =
+          draft.continuationSessionId?.let { getSession(it) }
+              ?: createSession(clientMetadata = draft.clientMetadata, projectId = draft.projectId)
 
         val totalImages = draft.evidence.size
       onProgress(

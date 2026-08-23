@@ -26,13 +26,16 @@
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 
 import android.app.Application
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -46,6 +49,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.foundation.shape.CircleShape
@@ -53,6 +57,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -63,6 +69,8 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDet
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectOverview
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProposalActionState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.SavedInvestigationReview
 
 @Composable
 fun ProjectDetailScreen(
@@ -85,8 +93,12 @@ fun ProjectDetailScreen(
                 ),
         ),
 ) {
+  // Re-entering this destination after Capture/Investigation must refresh the existing keyed
+  // ViewModel so the newly projected inferred RESULT Activity is visible immediately.
+  LaunchedEffect(project.projectId) { viewModel.loadOverview() }
   val uiState by viewModel.uiState.collectAsState()
   val activeActionState by viewModel.activeActionState.collectAsState()
+  val proposalActionState by viewModel.proposalActionState.collectAsState()
 
   Column(
       modifier =
@@ -149,6 +161,19 @@ fun ProjectDetailScreen(
             title = "Where We Left Off",
             body = overview.checkpoint.whereWeLeftOff ?: "No current work recorded.",
         )
+
+        overview.latestInvestigation?.let { investigation ->
+          SavedInvestigationSection(
+              investigation = investigation,
+              proposal = overview.pendingProposal,
+              actionState = proposalActionState,
+              onApply = viewModel::applyProposal,
+              onReject = viewModel::rejectProposal,
+          )
+        }
+        overview.investigationLoadError?.let {
+          Text("Saved Investigation details unavailable: $it", color = Color(0xFFFF8A80), modifier = Modifier.padding(top = 16.dp))
+        }
         ProjectSection(
             title = "Next Action",
             body = overview.checkpoint.nextAction ?: "No next action recorded.",
@@ -187,6 +212,70 @@ fun ProjectDetailScreen(
           Text("Continue Project", fontWeight = FontWeight.SemiBold)
         }
       }
+    }
+  }
+}
+
+@Composable
+private fun SavedInvestigationSection(
+    investigation: SavedInvestigationReview,
+    proposal: com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.CheckpointProposalReview?,
+    actionState: ProposalActionState,
+    onApply: (String) -> Unit,
+    onReject: (String) -> Unit,
+) {
+  Column(
+      modifier = Modifier.fillMaxWidth().padding(top = 24.dp).clip(RoundedCornerShape(16.dp))
+          .background(Color(0xFF24262B)).padding(16.dp),
+  ) {
+    Text("RECENT INVESTIGATION", color = AppColor.InkSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    Text("Your Investigation was saved.", color = AppColor.Success, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
+    Text("Status: ${investigation.status}", color = AppColor.InkSecondary, fontSize = 12.sp)
+    Text("Completed ${investigation.completedAtUtc}", color = AppColor.InkSecondary, fontSize = 12.sp)
+    Text("Session ${investigation.sessionId}", color = AppColor.InkSecondary, fontSize = 11.sp)
+    Text("${investigation.evidenceCount} evidence item(s) saved", color = AppColor.InkPrimary, modifier = Modifier.padding(top = 8.dp))
+    investigation.retainedImage?.let { bytes ->
+      BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { bitmap ->
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "Retained Investigation evidence",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxWidth().height(180.dp).padding(top = 10.dp).clip(RoundedCornerShape(12.dp)),
+        )
+      }
+    } ?: Text("Saved image preview unavailable.", color = AppColor.InkSecondary, modifier = Modifier.padding(top = 8.dp))
+    investigation.explanation?.let {
+      Text("Your explanation", color = AppColor.InkSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
+      Text(it, color = AppColor.InkPrimary)
+    }
+    Text("AI inference — unconfirmed", color = AppColor.Accent, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
+    Text(investigation.hypothesis, color = AppColor.InkPrimary, modifier = Modifier.padding(top = 4.dp))
+    Text("Recommended next action", color = AppColor.InkSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
+    Text(investigation.recommendedNextAction, color = AppColor.InkPrimary)
+    Text("Decision: ${investigation.trustDecision ?: "Not decided"}", color = AppColor.InkSecondary, modifier = Modifier.padding(top = 12.dp))
+
+    proposal?.let {
+      Text("PENDING PROJECT UPDATE", color = AppColor.Accent, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 20.dp))
+      Text("Pending approval", color = AppColor.InkSecondary)
+      it.proposedFields.filterValues { value -> value != null }.forEach { (field, value) ->
+        Text("${field.replace('_', ' ')} → $value", color = AppColor.InkPrimary, modifier = Modifier.padding(top = 6.dp))
+      }
+      val busy = actionState is ProposalActionState.InProgress
+      Button(
+          onClick = { onApply(it.proposalId) },
+          enabled = !busy,
+          modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+      ) { Text("Apply update") }
+      OutlinedButton(
+          onClick = { onReject(it.proposalId) },
+          enabled = !busy,
+          modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+      ) { Text("Reject") }
+    }
+    when (actionState) {
+      is ProposalActionState.Failed -> Text(actionState.message, color = Color(0xFFFF8A80), modifier = Modifier.padding(top = 8.dp))
+      is ProposalActionState.Succeeded -> Text(actionState.message, color = AppColor.Success, modifier = Modifier.padding(top = 8.dp))
+      else -> Unit
     }
   }
 }

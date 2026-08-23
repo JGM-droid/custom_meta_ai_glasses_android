@@ -73,6 +73,8 @@ fun CameraAccessScaffold(
     // before regardless of this value - it is only forwarded through to StreamScreen so an
     // eventual Investigation submission can attribute to the right Project.
     sourceProjectId: String? = null,
+    sourceProjectName: String? = null,
+    onReturnToSourceProject: (() -> Unit)? = null,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val snackbarHostState = remember { SnackbarHostState() }
@@ -93,6 +95,8 @@ fun CameraAccessScaffold(
             StreamScreen(
                 wearablesViewModel = viewModel,
                 sourceProjectId = sourceProjectId,
+                sourceProjectName = sourceProjectName,
+                onReturnToSourceProject = onReturnToSourceProject,
             )
         uiState.isRegistered ->
             NonStreamScreen(

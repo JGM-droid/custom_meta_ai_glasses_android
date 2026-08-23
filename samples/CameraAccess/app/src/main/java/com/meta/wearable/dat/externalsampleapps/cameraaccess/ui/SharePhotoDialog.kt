@@ -56,14 +56,14 @@ fun SharePhotoDialog(
             modifier = Modifier.fillMaxWidth().height(300.dp),
         )
 
-        Button(onClick = { onShare(photo) }, modifier = Modifier.fillMaxWidth()) {
-          Text(stringResource(R.string.share))
-        }
         if (onContinueToInvestigation != null) {
-          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            TextButton(onClick = onContinueToInvestigation) {
-              Text("Continue to investigation")
-            }
+          Button(onClick = onContinueToInvestigation, modifier = Modifier.fillMaxWidth()) {
+            Text("Use for Investigation")
+          }
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+          TextButton(onClick = { onShare(photo) }) {
+            Text(stringResource(R.string.share))
           }
         }
       }

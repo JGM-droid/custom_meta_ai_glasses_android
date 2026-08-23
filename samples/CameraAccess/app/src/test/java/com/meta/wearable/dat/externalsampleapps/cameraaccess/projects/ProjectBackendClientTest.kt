@@ -423,6 +423,24 @@ class ProjectBackendClientTest {
       assertEquals("Project does not exist.", exc.message)
     }
   }
+
+  @Test
+  fun applyAndRejectUseExistingProjectScopedProposalContracts() {
+    val proposalId = "33333333-3333-3333-3333-333333333333"
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val body = """{"proposal_id":"$proposalId","project_id":"$projectId","status":"applied"}"""
+    val applyRecorder = RequestRecorder(body)
+    val applyApi = HttpUrlProjectApi("http://10.0.2.2:8001", applyRecorder::newConnection)
+    runBlockingTest { applyApi.applyCheckpointProposal(projectId, proposalId) }
+    assertEquals("POST", applyRecorder.connection.requestMethod)
+    assertEquals("/projects/$projectId/checkpoint-proposals/$proposalId/apply", applyRecorder.connection.url.path)
+
+    val rejectRecorder = RequestRecorder(body.replace("applied", "rejected"))
+    val rejectApi = HttpUrlProjectApi("http://10.0.2.2:8001", rejectRecorder::newConnection)
+    runBlockingTest { rejectApi.rejectCheckpointProposal(projectId, proposalId) }
+    assertEquals("POST", rejectRecorder.connection.requestMethod)
+    assertEquals("/projects/$projectId/checkpoint-proposals/$proposalId/reject", rejectRecorder.connection.url.path)
+  }
 }
 
 private class RequestRecorder(private val body: String, private val code: Int = 200) {

@@ -59,6 +59,10 @@ interface ProjectApi {
 
   /** Read-only: asks THIS project's real backend Q&A route a question. Never mutates Project state. */
   suspend fun askProject(projectId: String, question: String): ProjectAskAnswer
+
+  suspend fun applyCheckpointProposal(projectId: String, proposalId: String)
+
+  suspend fun rejectCheckpointProposal(projectId: String, proposalId: String)
 }
 
 internal class ProjectApiException(val code: Int, val category: String, override val message: String) :
@@ -77,7 +81,8 @@ internal class HttpUrlProjectApi(
   }
 
   override suspend fun getProjectOverview(projectId: String): ProjectOverview {
-    val project = executeJsonObject(path = "/projects/${normalizeId(projectId)}")
+    val normalizedProjectId = normalizeId(projectId)
+    val project = executeJsonObject(path = "/projects/$normalizedProjectId")
     val summary = project.toProjectSummary()
 
     val checkpointJson = project.optJSONObject("checkpoint")
@@ -86,7 +91,7 @@ internal class HttpUrlProjectApi(
         nextAction = checkpointJson?.optNullableString("next_action"),
     )
 
-    val activitiesJson = executeJsonArray(path = "/projects/${normalizeId(projectId)}/activities")
+    val activitiesJson = executeJsonArray(path = "/projects/$normalizedProjectId/activities")
     // Backend returns activities oldest-first (occurred_at_utc ascending); show the most recent
     // ones, newest first.
     val recentActivity = (0 until activitiesJson.length())
@@ -95,7 +100,62 @@ internal class HttpUrlProjectApi(
         .asReversed()
         .map { summaryText -> ProjectActivityEntry(summary = summaryText) }
 
-    return ProjectOverview(project = summary, checkpoint = checkpoint, recentActivity = recentActivity)
+    var investigation: SavedInvestigationReview? = null
+    var linkedProposal: CheckpointProposalReview? = null
+    var investigationLoadError: String? = null
+    try {
+      val sessions = executeJsonArray(path = "/projects/$normalizedProjectId/investigation-sessions")
+      val latestSession = (0 until sessions.length())
+          .map { sessions.getJSONObject(it) }
+          .filter { it.optString("status") == "completed" }
+          .maxByOrNull { it.optString("updated_at_utc") }
+      if (latestSession != null) {
+      val sessionId = latestSession.getString("session_id")
+      val trust = executeJsonObject(path = "/projects/$normalizedProjectId/investigation-sessions/$sessionId/trust")
+      val evidence = executeJsonArray(path = "/projects/$normalizedProjectId/investigation-sessions/$sessionId/evidence")
+      val firstImage = (0 until evidence.length()).map { evidence.getJSONObject(it) }
+          .firstOrNull { it.optString("evidence_type") == "image" }
+      val imageBytes = firstImage?.let {
+        try {
+          executeBytes(path = "/projects/$normalizedProjectId/investigation-sessions/$sessionId/evidence/${normalizeId(it.getString("evidence_id"))}/content")
+        } catch (_: ProjectApiException) {
+          null
+        }
+      }
+      val explanation = (0 until evidence.length()).map { evidence.getJSONObject(it) }
+          .firstNotNullOfOrNull { it.optNullableString("normalized_text") }
+      val proposalId = trust.optNullableString("checkpoint_proposal_id")
+      if (proposalId != null) {
+        linkedProposal = executeJsonObject(path = "/projects/$normalizedProjectId/checkpoint-proposals/${normalizeId(proposalId)}")
+            .toCheckpointProposalReview()
+      }
+      investigation = SavedInvestigationReview(
+          sessionId = sessionId,
+          projectId = latestSession.getString("project_id"),
+          status = latestSession.getString("status"),
+          completedAtUtc = latestSession.getString("updated_at_utc"),
+          evidenceCount = evidence.length(),
+          explanation = explanation,
+          hypothesis = trust.getString("hypothesis"),
+          recommendedNextAction = trust.getString("recommended_next_action"),
+          trustDecision = trust.optNullableString("user_decision"),
+          proposalId = proposalId,
+          proposalStatus = trust.optNullableString("checkpoint_proposal_status"),
+          retainedImage = imageBytes,
+      )
+      }
+    } catch (exc: ProjectApiException) {
+      investigationLoadError = exc.message
+    }
+
+    return ProjectOverview(
+        project = summary,
+        checkpoint = checkpoint,
+        recentActivity = recentActivity,
+        latestInvestigation = investigation,
+        pendingProposal = linkedProposal?.takeIf { it.status == "pending" },
+        investigationLoadError = investigationLoadError,
+    )
   }
 
   override suspend fun createProject(request: NewProjectRequest): ProjectSummary {
@@ -154,6 +214,26 @@ internal class HttpUrlProjectApi(
     )
   }
 
+  override suspend fun applyCheckpointProposal(projectId: String, proposalId: String) {
+    executeJsonObject(path = "/projects/${normalizeId(projectId)}/checkpoint-proposals/${normalizeId(proposalId)}/apply", method = "POST")
+  }
+
+  override suspend fun rejectCheckpointProposal(projectId: String, proposalId: String) {
+    executeJsonObject(path = "/projects/${normalizeId(projectId)}/checkpoint-proposals/${normalizeId(proposalId)}/reject", method = "POST")
+  }
+
+  private fun JSONObject.toCheckpointProposalReview(): CheckpointProposalReview {
+    val patch = getJSONObject("proposed_checkpoint_patch")
+    val fields = patch.keys().asSequence().associateWith { key -> patch.optNullableString(key) }
+    return CheckpointProposalReview(
+        proposalId = getString("proposal_id"),
+        projectId = getString("project_id"),
+        status = getString("status"),
+        reason = getString("reason"),
+        proposedFields = fields,
+    )
+  }
+
   private fun JSONObject.toProjectSummary(): ProjectSummary =
       ProjectSummary(
           projectId = getString("project_id"),
@@ -175,6 +255,17 @@ internal class HttpUrlProjectApi(
   private fun executeJsonArray(path: String): JSONArray {
     val connection = openConnection(path)
     return connection.useJsonResponse { responseBody -> JSONArray(responseBody) }
+  }
+
+  private fun executeBytes(path: String): ByteArray {
+    val connection = openConnection(path)
+    val code = connection.responseCode
+    if (code !in 200..299) {
+      val body = connection.errorStream?.use { it.readBytes().toString(StandardCharsets.UTF_8) }.orEmpty()
+      val error = parseApiError(body)
+      throw ProjectApiException(code, error.first, error.second)
+    }
+    return connection.inputStream.use { it.readBytes() }
   }
 
   /** For endpoints whose success response has no body (e.g. 204), so no JSON parse is attempted. */

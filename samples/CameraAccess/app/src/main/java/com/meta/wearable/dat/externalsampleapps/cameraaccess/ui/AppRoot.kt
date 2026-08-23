@@ -164,6 +164,11 @@ fun AppRoot(
               viewModel = viewModel,
               onRequestWearablesPermission = onRequestWearablesPermission,
               sourceProjectId = screen.sourceProject?.projectId,
+              sourceProjectName = screen.sourceProject?.name,
+              onReturnToSourceProject =
+                  screen.sourceProject?.let { project ->
+                    { topLevelScreen = TopLevelScreen.ProjectDetail(project) }
+                  },
           )
 
           // Only offer a way back while not actively streaming. Compose removing

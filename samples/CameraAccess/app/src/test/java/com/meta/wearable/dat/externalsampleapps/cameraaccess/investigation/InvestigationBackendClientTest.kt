@@ -66,6 +66,38 @@ class InvestigationBackendClientTest {
     assertTrue(body.contains("\"expected_revision\":3"))
     assertEquals("application/json; charset=utf-8", recorder.connection.customHeaders["Content-Type"])
   }
+
+  @Test
+  fun trustDecisionUsesExistingProjectScopedContract() {
+    val recorder = RequestRecorder(trustResponseBody())
+    val api = HttpUrlInvestigationSessionApi(
+        baseUrl = "https://glasses-api.customaiglasses.us",
+        connectionFactory = { url -> recorder.newConnection(url) },
+    )
+
+    val response = runBlockingTest {
+      api.submitTrustDecision(
+          projectId = "11111111-1111-1111-1111-111111111111",
+          sessionId = "123e4567-e89b-12d3-a456-426614174000",
+          request =
+              BackendTrustDecisionRequestDto(
+                  decision = BackendTrustDecision.DISAGREE,
+                  correction = "  Measured value is normal.  ",
+              ),
+      )
+    }
+
+    assertEquals("POST", recorder.connection.requestMethod)
+    assertEquals(
+        "/projects/11111111-1111-1111-1111-111111111111/investigation-sessions/123e4567-e89b-12d3-a456-426614174000/trust-decision",
+        recorder.connection.url.path,
+    )
+    val body = recorder.connection.output.toString(StandardCharsets.UTF_8.name())
+    assertTrue(body.contains("\"decision\":\"disagree\""))
+    assertTrue(body.contains("\"correction\":\"Measured value is normal.\""))
+    assertEquals("needs_reassessment", response.status)
+    assertEquals("123e4567-e89b-12d3-a456-426614174444", response.decisionActivityId)
+  }
 }
 
 private class RequestRecorder(private val responseBody: String) {
@@ -135,6 +167,21 @@ private fun createSessionResponseBody(): String {
         "latest_analysis_attempt_id":null,
         "completed_result_id":null,
         "last_error":null
+      }
+      """.trimIndent()
+}
+
+private fun trustResponseBody(): String {
+  return """
+      {
+        "trust_state": {
+          "status":"needs_reassessment",
+          "checkpoint_proposal_id":null,
+          "checkpoint_proposal_status":null,
+          "follow_up_investigation_session_id":null
+        },
+        "decision_activity":{"activity_id":"123e4567-e89b-12d3-a456-426614174444"},
+        "checkpoint_proposal":null
       }
       """.trimIndent()
 }

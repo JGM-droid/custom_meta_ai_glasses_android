@@ -80,6 +80,13 @@ sealed interface ProjectAskState {
   data class Failed(val question: String, val message: String) : ProjectAskState
 }
 
+sealed interface ProposalActionState {
+  data object Idle : ProposalActionState
+  data object InProgress : ProposalActionState
+  data class Succeeded(val message: String) : ProposalActionState
+  data class Failed(val message: String) : ProposalActionState
+}
+
 class ProjectDetailViewModel(
     application: Application,
     private val projectId: String,
@@ -107,6 +114,9 @@ class ProjectDetailViewModel(
 
   private val _askState = MutableStateFlow<ProjectAskState>(ProjectAskState.Idle)
   val askState: StateFlow<ProjectAskState> = _askState.asStateFlow()
+
+  private val _proposalActionState = MutableStateFlow<ProposalActionState>(ProposalActionState.Idle)
+  val proposalActionState: StateFlow<ProposalActionState> = _proposalActionState.asStateFlow()
 
   init {
     loadOverview()
@@ -196,6 +206,29 @@ class ProjectDetailViewModel(
   fun dismissAskError() {
     if (_askState.value is ProjectAskState.Failed) {
       _askState.update { ProjectAskState.Idle }
+    }
+  }
+
+  fun applyProposal(proposalId: String) = resolveProposal(proposalId, apply = true)
+
+  fun rejectProposal(proposalId: String) = resolveProposal(proposalId, apply = false)
+
+  private fun resolveProposal(proposalId: String, apply: Boolean) {
+    if (_proposalActionState.value is ProposalActionState.InProgress) return
+    _proposalActionState.value = ProposalActionState.InProgress
+    viewModelScope.launch {
+      try {
+        withContext(Dispatchers.IO) {
+          if (apply) repository.applyCheckpointProposal(projectId, proposalId)
+          else repository.rejectCheckpointProposal(projectId, proposalId)
+        }
+        _proposalActionState.value = ProposalActionState.Succeeded(
+            if (apply) "Project update applied." else "Project update rejected; Investigation history was preserved."
+        )
+        loadOverview()
+      } catch (exc: Exception) {
+        _proposalActionState.value = ProposalActionState.Failed(exc.message ?: "Could not update the proposal.")
+      }
     }
   }
 }

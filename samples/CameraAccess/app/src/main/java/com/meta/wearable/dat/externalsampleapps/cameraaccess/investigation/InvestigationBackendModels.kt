@@ -377,6 +377,49 @@ internal data class BackendSessionAnalyzeRequestDto(
       }
 }
 
+internal enum class BackendTrustDecision(val wireValue: String) {
+  CONTINUE("continue"),
+  DISAGREE("disagree"),
+  MORE_EVIDENCE("more_evidence"),
+}
+
+internal data class BackendTrustDecisionRequestDto(
+    val decision: BackendTrustDecision,
+    val correction: String? = null,
+) {
+  fun toJsonObject(): JSONObject =
+      JSONObject().put("decision", decision.wireValue).apply {
+        correction?.trim()?.takeIf { it.isNotEmpty() }?.let { put("correction", it) }
+      }
+}
+
+internal data class BackendTrustDecisionResponseDto(
+    val status: String,
+    val decisionActivityId: String,
+    val checkpointProposalId: String?,
+    val checkpointProposalStatus: String?,
+    val followUpSessionId: String?,
+) {
+  companion object {
+    fun fromJsonObject(json: JSONObject): BackendTrustDecisionResponseDto {
+      val trustState = json.getJSONObject("trust_state")
+      val activity = json.getJSONObject("decision_activity")
+      val proposal = json.optJSONObject("checkpoint_proposal")
+      return BackendTrustDecisionResponseDto(
+          status = trustState.getString("status"),
+          decisionActivityId = activity.getString("activity_id"),
+          checkpointProposalId =
+              proposal?.optStringOrNull("proposal_id")
+                  ?: trustState.optStringOrNull("checkpoint_proposal_id"),
+          checkpointProposalStatus =
+              proposal?.optStringOrNull("status")
+                  ?: trustState.optStringOrNull("checkpoint_proposal_status"),
+          followUpSessionId = trustState.optStringOrNull("follow_up_investigation_session_id"),
+      )
+    }
+  }
+}
+
 internal data class BackendSessionAnalyzeResponseDto(
     val sessionId: String,
     val investigationId: String?,

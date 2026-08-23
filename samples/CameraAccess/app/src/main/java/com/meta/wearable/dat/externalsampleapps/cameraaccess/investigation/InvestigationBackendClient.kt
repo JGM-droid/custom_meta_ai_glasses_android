@@ -20,6 +20,12 @@ internal interface InvestigationSessionApi {
       request: BackendSessionAnalyzeRequestDto,
   ): BackendSessionAnalyzeResponseDto
 
+  suspend fun submitTrustDecision(
+      projectId: String,
+      sessionId: String,
+      request: BackendTrustDecisionRequestDto,
+  ): BackendTrustDecisionResponseDto
+
   suspend fun pauseSession(sessionId: String, request: BackendSessionMutationRequestDto): BackendSessionDto
 
   suspend fun resumeSession(sessionId: String, request: BackendSessionMutationRequestDto): BackendSessionDto
@@ -87,6 +93,21 @@ internal class HttpUrlInvestigationSessionApi(
         requestBody = request.toJsonObject().toString(),
     )
     return BackendSessionAnalyzeResponseDto.fromJsonObject(response)
+  }
+
+  override suspend fun submitTrustDecision(
+      projectId: String,
+      sessionId: String,
+      request: BackendTrustDecisionRequestDto,
+  ): BackendTrustDecisionResponseDto {
+    val response =
+        executeJson(
+            method = "POST",
+            path =
+                "/projects/${normalizeId(projectId)}/investigation-sessions/${normalizeId(sessionId)}/trust-decision",
+            requestBody = request.toJsonObject().toString(),
+        )
+    return BackendTrustDecisionResponseDto.fromJsonObject(response)
   }
 
   override suspend fun pauseSession(sessionId: String, request: BackendSessionMutationRequestDto): BackendSessionDto {

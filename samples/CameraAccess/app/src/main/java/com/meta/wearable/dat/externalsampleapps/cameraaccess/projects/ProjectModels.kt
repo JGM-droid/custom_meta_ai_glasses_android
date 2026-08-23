@@ -45,11 +45,37 @@ data class ProjectActivityEntry(
     val summary: String,
 )
 
+data class SavedInvestigationReview(
+    val sessionId: String,
+    val projectId: String,
+    val status: String,
+    val completedAtUtc: String,
+    val evidenceCount: Int,
+    val explanation: String?,
+    val hypothesis: String,
+    val recommendedNextAction: String,
+    val trustDecision: String?,
+    val proposalId: String?,
+    val proposalStatus: String?,
+    val retainedImage: ByteArray?,
+)
+
+data class CheckpointProposalReview(
+    val proposalId: String,
+    val projectId: String,
+    val status: String,
+    val reason: String,
+    val proposedFields: Map<String, String?>,
+)
+
 /** The full Project Overview: identity + current state + history, kept as separate fields. */
 data class ProjectOverview(
     val project: ProjectSummary,
     val checkpoint: ProjectCheckpoint,
     val recentActivity: List<ProjectActivityEntry>,
+    val latestInvestigation: SavedInvestigationReview? = null,
+    val pendingProposal: CheckpointProposalReview? = null,
+    val investigationLoadError: String? = null,
 )
 
 /**

@@ -28,11 +28,13 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 fun CircleButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     content: @Composable RowScope.() -> Unit,
 ) {
   Button(
       modifier = modifier.aspectRatio(1f),
       onClick = onClick,
+      enabled = enabled,
       colors = ButtonDefaults.buttonColors(containerColor = Color.White),
       shape = CircleShape,
       contentPadding = PaddingValues(0.dp),
@@ -41,8 +43,8 @@ fun CircleButton(
 }
 
 @Composable
-fun CaptureButton(onClick: () -> Unit) {
-  CircleButton(onClick = onClick) {
+fun CaptureButton(onClick: () -> Unit, enabled: Boolean = true) {
+  CircleButton(onClick = onClick, enabled = enabled) {
     Icon(
         imageVector = Icons.Filled.PhotoCamera,
         contentDescription = stringResource(R.string.capture_photo),

@@ -43,6 +43,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.BuildConfig
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceInput
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceSource
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.BackendTrustDecision
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationProductPhase
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSpeechEvent
@@ -58,6 +59,8 @@ internal fun BackendInvestigationPanel(
     modifier: Modifier = Modifier,
     prefillLiveEvidence: InvestigationEvidenceInput? = null,
     viewModel: InvestigationSessionDebugViewModel,
+  sourceProjectName: String? = null,
+  onReturnToProject: (() -> Unit)? = null,
   onCaptureAnotherView: (() -> Unit)? = null,
   onPrefillApplied: (() -> Unit)? = null,
 ) {
@@ -67,6 +70,7 @@ internal fun BackendInvestigationPanel(
   val speechController = remember(context) { createInvestigationSpeechRecognizerController(context) }
   var showCameraPermissionAlert by remember { mutableStateOf(false) }
   var showDeveloperDetails by remember { mutableStateOf(false) }
+  var showDisagreeInput by remember { mutableStateOf(false) }
   var speechUiState by remember { mutableStateOf(InvestigationSpeechUiState()) }
   val panelScrollState = rememberScrollState()
 
@@ -162,6 +166,15 @@ internal fun BackendInvestigationPanel(
           style = MaterialTheme.typography.titleMedium,
           fontWeight = FontWeight.SemiBold,
       )
+
+      sourceProjectName?.let { projectName ->
+        Text(
+            text = "Project: $projectName",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+        )
+      }
 
       Text(
           text =
@@ -313,6 +326,11 @@ internal fun BackendInvestigationPanel(
             fontWeight = FontWeight.SemiBold,
         )
         Text(
+            text = "AI inference — unconfirmed working hypothesis",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
           text = compactResult.diagnosisShort,
             style = MaterialTheme.typography.bodyLarge,
         )
@@ -325,6 +343,74 @@ internal fun BackendInvestigationPanel(
           text = compactResult.requiredNextActionShort,
             style = MaterialTheme.typography.bodyLarge,
         )
+
+        if (uiState.trustControlsAvailable) {
+          HorizontalDivider()
+          Text(
+              text = "What should happen next?",
+              style = MaterialTheme.typography.titleSmall,
+              fontWeight = FontWeight.SemiBold,
+          )
+          Text(
+              text = "Continue means reasonable enough to work from. It does not confirm the AI result.",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+          Button(
+              onClick = { viewModel.submitTrustDecision(BackendTrustDecision.CONTINUE) },
+              modifier = Modifier.fillMaxWidth(),
+              enabled = !uiState.trustDecisionInFlight,
+          ) {
+            Text("Continue with working hypothesis")
+          }
+          Button(
+              onClick = { viewModel.submitTrustDecision(BackendTrustDecision.MORE_EVIDENCE) },
+              modifier = Modifier.fillMaxWidth(),
+              enabled = !uiState.trustDecisionInFlight,
+          ) {
+            Text("Gather more evidence")
+          }
+          TextButton(
+              onClick = { showDisagreeInput = !showDisagreeInput },
+              enabled = !uiState.trustDecisionInFlight,
+          ) {
+            Text("Disagree with AI")
+          }
+          if (showDisagreeInput) {
+            OutlinedTextField(
+                value = uiState.trustCorrectionText,
+                onValueChange = viewModel::setTrustCorrectionText,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Optional explanation or correction") },
+                placeholder = { Text("You can disagree without knowing the correct answer") },
+                minLines = 2,
+            )
+            Button(
+                onClick = { viewModel.submitTrustDecision(BackendTrustDecision.DISAGREE) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !uiState.trustDecisionInFlight,
+            ) {
+              Text("Save disagreement")
+            }
+          }
+          if (uiState.trustDecisionInFlight) {
+            Text("Saving decision…")
+          }
+        }
+      }
+
+      uiState.trustMessage?.let { message ->
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+
+      if (uiState.trustDecision != null && onReturnToProject != null) {
+        Button(onClick = onReturnToProject, modifier = Modifier.fillMaxWidth()) {
+          Text("Return to ${sourceProjectName ?: "Project"}")
+        }
       }
 
       if (productState.phase == InvestigationProductPhase.FAILED && uiState.statusMessage != null) {

@@ -643,6 +643,43 @@ class InvestigationSessionRepositoryTest {
     assertFalse(failed.error.message.contains("capability gap", ignoreCase = true))
   }
 
+  @Test
+  fun moreEvidenceContinuationReusesBackendCreatedSession() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api, pollDelay = {})
+
+    val outcome =
+        repository.submitInvestigation(
+            InvestigationSubmissionDraft(
+                evidence = listOf(image("follow-up.jpg")),
+                explanationText = "Additional evidence",
+                projectId = "11111111-1111-1111-1111-111111111111",
+                continuationSessionId = FakeInvestigationSessionApi.SESSION_ID,
+            ),
+        )
+
+    assertTrue(outcome is InvestigationSubmissionOutcome.Completed)
+    assertEquals(0, api.createSessionCalls)
+    assertTrue(api.callTrace.first() == "upload:follow-up.jpg")
+  }
+
+  @Test
+  fun trustDecisionIsProjectScopedAndUsesExistingApi() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api)
+
+    val response =
+        repository.submitTrustDecision(
+            projectId = "11111111-1111-1111-1111-111111111111",
+            sessionId = FakeInvestigationSessionApi.SESSION_ID,
+            decision = BackendTrustDecision.MORE_EVIDENCE,
+        )
+
+    assertEquals("unresolved", response.status)
+    assertEquals("123e4567-e89b-12d3-a456-426614174444", response.followUpSessionId)
+    assertTrue(api.callTrace.single().startsWith("trust:more_evidence:11111111"))
+  }
+
   private fun image(
       name: String,
       mimeType: String = "image/jpeg",
@@ -715,6 +752,33 @@ private class FakeInvestigationSessionApi(
     analyzeCalls += 1
     analyzeException?.let { throw it }
     return analyzeResponse
+  }
+
+  override suspend fun submitTrustDecision(
+      projectId: String,
+      sessionId: String,
+      request: BackendTrustDecisionRequestDto,
+  ): BackendTrustDecisionResponseDto {
+    callTrace += "trust:${request.decision.wireValue}:$projectId:$sessionId"
+    return BackendTrustDecisionResponseDto(
+        status =
+            when (request.decision) {
+              BackendTrustDecision.CONTINUE -> "working_hypothesis"
+              BackendTrustDecision.DISAGREE -> "needs_reassessment"
+              BackendTrustDecision.MORE_EVIDENCE -> "unresolved"
+            },
+        decisionActivityId = "123e4567-e89b-12d3-a456-426614174222",
+        checkpointProposalId =
+            if (request.decision == BackendTrustDecision.CONTINUE) {
+              "123e4567-e89b-12d3-a456-426614174333"
+            } else null,
+        checkpointProposalStatus =
+            if (request.decision == BackendTrustDecision.CONTINUE) "pending" else null,
+        followUpSessionId =
+            if (request.decision == BackendTrustDecision.MORE_EVIDENCE) {
+              "123e4567-e89b-12d3-a456-426614174444"
+            } else null,
+    )
   }
 
   override suspend fun pauseSession(sessionId: String, request: BackendSessionMutationRequestDto): BackendSessionDto {

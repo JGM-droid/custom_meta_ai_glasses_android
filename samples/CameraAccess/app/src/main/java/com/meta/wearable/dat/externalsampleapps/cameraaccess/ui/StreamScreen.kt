@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -66,6 +67,8 @@ internal fun StreamScreen(
     // Explicit Project attribution carried in from Workspace via AppRoot/CameraAccessScaffold -
     // see CameraAccessScaffold.kt. Null for the existing global Capture entry point.
     sourceProjectId: String? = null,
+    sourceProjectName: String? = null,
+    onReturnToSourceProject: (() -> Unit)? = null,
     streamViewModel: StreamViewModel =
         viewModel(
             factory =
@@ -126,12 +129,23 @@ internal fun StreamScreen(
       }
     }
     if (streamUiState.streamState == StreamState.STARTING) {
-      CircularProgressIndicator(
+      Column(
           modifier = Modifier.align(Alignment.Center),
-      )
+          horizontalAlignment = Alignment.CenterHorizontally,
+          verticalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        CircularProgressIndicator()
+        Text("Connecting to glasses camera…")
+      }
     }
 
     Box(modifier = Modifier.fillMaxSize().padding(all = 24.dp)) {
+      sourceProjectName?.let { projectName ->
+        Text(
+            text = "Working on $projectName",
+            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding(),
+        )
+      }
       Column(
           modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding(),
           verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -157,6 +171,7 @@ internal fun StreamScreen(
           // Photo capture button
           CaptureButton(
               onClick = { streamViewModel.capturePhoto() },
+              enabled = streamUiState.streamState == StreamState.STREAMING,
           )
         }
       }
@@ -171,6 +186,14 @@ internal fun StreamScreen(
             modifier = Modifier.fillMaxWidth(),
             prefillLiveEvidence = streamUiState.capturedInvestigationEvidence,
             viewModel = investigationViewModel,
+            sourceProjectName = sourceProjectName,
+            onReturnToProject =
+                onReturnToSourceProject?.let { returnToProject ->
+                  {
+                    streamViewModel.stopStream()
+                    returnToProject()
+                  }
+                },
             onCaptureAnotherView = {
               streamViewModel.prepareForAdditionalInvestigationCapture()
             },
@@ -182,17 +205,10 @@ internal fun StreamScreen(
     }
 
     if (showInvestigationReopenAffordance) {
-      AssistChip(
+      Button(
           onClick = { streamViewModel.showInvestigationPanel() },
-          label = { Text(investigationReopenLabel) },
-          leadingIcon = {
-            Icon(
-                imageVector = Icons.Default.Description,
-                contentDescription = "Investigation",
-            )
-          },
           modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(16.dp),
-      )
+      ) { Text("Resume $investigationReopenLabel") }
     }
   }
 

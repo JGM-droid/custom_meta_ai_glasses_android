@@ -67,6 +67,10 @@ interface ProjectRepository {
    * surfaces the error rather than assuming an answer. Never mutates Project state.
    */
   suspend fun askProject(projectId: String, question: String): ProjectAskAnswer
+
+  suspend fun applyCheckpointProposal(projectId: String, proposalId: String)
+
+  suspend fun rejectCheckpointProposal(projectId: String, proposalId: String)
 }
 
 /** Production repository: reads/creates real Project Memory data via the FastAPI backend. */
@@ -90,6 +94,12 @@ class HttpUrlProjectRepository(
 
   override suspend fun askProject(projectId: String, question: String): ProjectAskAnswer =
       api.askProject(projectId, question)
+
+  override suspend fun applyCheckpointProposal(projectId: String, proposalId: String) =
+      api.applyCheckpointProposal(projectId, proposalId)
+
+  override suspend fun rejectCheckpointProposal(projectId: String, proposalId: String) =
+      api.rejectCheckpointProposal(projectId, proposalId)
 }
 
 /**
@@ -189,5 +199,13 @@ class MockProjectRepository : ProjectRepository {
         providerModel = null,
         modelCallCount = 1,
     )
+  }
+
+  override suspend fun applyCheckpointProposal(projectId: String, proposalId: String) {
+    require(overviews.containsKey(projectId))
+  }
+
+  override suspend fun rejectCheckpointProposal(projectId: String, proposalId: String) {
+    require(overviews.containsKey(projectId))
   }
 }
