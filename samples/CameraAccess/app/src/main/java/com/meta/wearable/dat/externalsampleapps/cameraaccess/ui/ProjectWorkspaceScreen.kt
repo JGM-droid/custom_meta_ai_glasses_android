@@ -28,10 +28,27 @@
 //
 // Project Actions exposes exactly one real action - "Capture / Test Glasses", reusing the exact
 // same Capture entry point Projects Home already offers (no project-scoped capture attribution
-// is implemented yet - see AppRoot). The composer's microphone/camera affordances are visually
-// reserved but disabled - they represent later inline capture-while-typing, not a shortcut into
-// the full-screen Capture flow (that already has its own clearly-labeled entry point in Project
-// Actions).
+// is implemented yet - see AppRoot). The composer's camera affordance is still visually reserved
+// but disabled; the microphone affordance is now real (see Voice-to-Text below) - the camera one
+// still represents later inline capture-while-typing, not a shortcut into the full-screen Capture
+// flow (that already has its own clearly-labeled entry point in Project Actions).
+//
+// Voice-to-Text: the mic button reuses the EXISTING Android SpeechRecognizer plumbing built for
+// the Investigation flow - InvestigationSpeechRecognizerController (ui/
+// InvestigationSpeechRecognizerController.kt) and the pure reduceInvestigationSpeechState/
+// InvestigationSpeechEvent/InvestigationSpeechUiState state machine (investigation/
+// InvestigationSpeechState.kt) - rather than a second, duplicate speech implementation. Neither
+// of those types has anything Investigation-specific in it (confirmed by inspection before
+// reusing them): the reducer is a plain event->state function, and the controller is a generic
+// on-device-SpeechRecognizer wrapper. Only the destination differs: Investigation pipes its
+// transcript into an explanation field; Workspace pipes it into the SAME composer real typed text
+// already uses (see onSpeechEvent below), with the exact append-don't-destroy behavior Phase 5 of
+// the Voice-to-Text slice requires. Voice is purely an input method: a transcript only ever
+// updates local draft state (draftText) - it never calls askProject() itself and never touches
+// the backend. speechControllerFactory is the test seam this slice adds: production code defaults
+// it to the real createInvestigationSpeechRecognizerController factory, and instrumented tests
+// inject a fake InvestigationSpeechRecognizerController instead of driving the real on-device
+// recognizer (which cannot be reliably scripted in an automated test).
 //
 // Ask Project (Project-Aware Ask): the composer is now a real interaction, not just draft text.
 // "Ask Project" sends the typed question to the backend's existing, read-only
@@ -48,7 +65,11 @@
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 
+import android.Manifest
 import android.app.Application
+import android.content.Context
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -80,6 +101,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -96,6 +118,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSpeechEvent
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSpeechUiPhase
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSpeechUiState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.reduceInvestigationSpeechState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectActivityEntry
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectAskAnswer
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectAskState
@@ -103,8 +129,12 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDet
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
 
+// internal (not public): speechControllerFactory's parameter type (InvestigationSpeechRecognizerController,
+// the test seam - see file header) is itself internal, and Kotlin forbids an internal type in a
+// public signature. AppRoot.kt (the only caller) is in the same module/package, so this loses
+// nothing - matches BackendInvestigationPanel's own `internal fun` for the same reason.
 @Composable
-fun ProjectWorkspaceScreen(
+internal fun ProjectWorkspaceScreen(
     project: ProjectSummary,
     onBack: () -> Unit,
     onOpenCapture: () -> Unit,
@@ -121,6 +151,10 @@ fun ProjectWorkspaceScreen(
                     projectId = project.projectId,
                 ),
         ),
+    // Test seam: production uses the real on-device SpeechRecognizer via the existing
+    // Investigation controller factory; instrumented tests pass a fake instead.
+    speechControllerFactory: (Context) -> InvestigationSpeechRecognizerController? =
+        ::createInvestigationSpeechRecognizerController,
 ) {
   val uiState by viewModel.uiState.collectAsState()
   val activeActionState by viewModel.activeActionState.collectAsState()
@@ -140,6 +174,46 @@ fun ProjectWorkspaceScreen(
       draftText = ""
     }
   }
+
+  // Voice-to-text plumbing - see file header. Scoped per-project the same way draftText is: a
+  // fresh Workspace mount for a different project_id gets a fresh controller/state, so one
+  // Project's in-flight/listening voice session can never bleed into another's.
+  val context = LocalContext.current
+  val speechController = remember(project.projectId, context) { speechControllerFactory(context) }
+  var speechUiState by remember(project.projectId) { mutableStateOf(InvestigationSpeechUiState()) }
+
+  // Stops/releases the recognizer whenever this Workspace (or this specific Project's instance
+  // of it) leaves composition - navigating away must never leak a live recognizer/Activity
+  // reference, and reopening Workspace must always get a fresh, working recognizer.
+  DisposableEffect(speechController) {
+    onDispose { speechController?.destroy() }
+  }
+
+  // Voice is an input method only: a transcript ever does exactly one thing - update draftText.
+  // It never calls askProject() and never touches the backend (Phase 6/7 of the Voice-to-Text
+  // slice). Append rather than overwrite when the composer already has text (Phase 5).
+  val onSpeechEvent: (InvestigationSpeechEvent) -> Unit = { event ->
+    val transition = reduceInvestigationSpeechState(speechUiState, event)
+    speechUiState = transition.state
+    transition.transcript?.let { transcript -> draftText = appendTranscriptToDraft(draftText, transcript) }
+  }
+
+  val startSpeechCapture: () -> Unit = {
+    if (speechController == null) {
+      onSpeechEvent(InvestigationSpeechEvent.UnknownError("Speech recognition is unavailable on this device."))
+    } else {
+      speechController.startListening(onSpeechEvent)
+    }
+  }
+
+  val microphonePermissionLauncher =
+      rememberLauncherForActivityResult(contract = ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+          startSpeechCapture()
+        } else {
+          onSpeechEvent(InvestigationSpeechEvent.PermissionDenied)
+        }
+      }
 
   Column(
       modifier =
@@ -211,6 +285,12 @@ fun ProjectWorkspaceScreen(
             onTextChange = { draftText = it },
             askState = askState,
             onAskProject = { viewModel.askProject(draftText) },
+            speechUiState = speechUiState,
+            onMicClick = { microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+            onCancelListening = {
+              speechController?.cancel()
+              onSpeechEvent(InvestigationSpeechEvent.Cancelled)
+            },
         )
 
         val answeredState = askState as? ProjectAskState.Answered
@@ -228,17 +308,33 @@ fun ProjectWorkspaceScreen(
   }
 }
 
+/**
+ * Pure, unit-testable merge of a voice transcript into the composer's current draft text (Phase 5
+ * of the Voice-to-Text slice): an empty (or whitespace-only) draft is replaced outright; a
+ * non-empty draft is preserved and the transcript is appended on a new line rather than
+ * destroying what the user already typed.
+ */
+internal fun appendTranscriptToDraft(currentDraft: String, transcript: String): String =
+    if (currentDraft.isBlank()) transcript else "$currentDraft\n$transcript"
+
 @Composable
 private fun WorkspaceComposer(
     text: String,
     onTextChange: (String) -> Unit,
     askState: ProjectAskState,
     onAskProject: () -> Unit,
+    speechUiState: InvestigationSpeechUiState,
+    onMicClick: () -> Unit,
+    onCancelListening: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
   val isSubmitting = askState is ProjectAskState.Submitting
   // Whitespace-only input can never submit - trimmed the same way the ViewModel itself checks.
   val canSubmit = text.isNotBlank() && !isSubmitting
+  val isListening = speechUiState.phase == InvestigationSpeechUiPhase.LISTENING
+  // Can't start a new voice session while one is already listening or a question is in flight -
+  // and can't submit Ask while voice is listening, since the transcript hasn't landed yet.
+  val micEnabled = !isListening && !isSubmitting
 
   Column(modifier = modifier.padding(top = 28.dp)) {
     Text(
@@ -277,20 +373,33 @@ private fun WorkspaceComposer(
             ),
     )
 
-    // Reserved, not functional yet - see file header. Disabled rather than omitted, so the
-    // eventual voice/capture affordances have a stable, already-designed home to appear in.
+    // The mic is now real (see file header); the camera/evidence affordance stays reserved but
+    // disabled - it represents a later inline capture shortcut, not this slice's scope.
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.padding(top = 10.dp),
     ) {
-      IconButton(onClick = {}, enabled = false) {
-        Icon(Icons.Filled.Mic, contentDescription = "Voice - coming soon", tint = AppColor.InkSecondary)
+      IconButton(
+          onClick = onMicClick,
+          enabled = micEnabled,
+          modifier = Modifier.testTag("workspace_mic_button"),
+      ) {
+        Icon(
+            Icons.Filled.Mic,
+            contentDescription = if (isListening) "Listening" else "Voice input",
+            tint = if (isListening) AppColor.Accent else AppColor.InkSecondary,
+        )
       }
       Text(
-          text = "Voice - coming soon",
-          color = AppColor.InkSecondary,
+          text = speechUiState.speakButtonLabel,
+          color = if (isListening) AppColor.Accent else AppColor.InkSecondary,
           fontSize = 12.sp,
       )
+      if (speechUiState.canCancel) {
+        TextButton(onClick = onCancelListening, modifier = Modifier.testTag("workspace_mic_cancel")) {
+          Text("Cancel", color = AppColor.Accent, fontSize = 12.sp)
+        }
+      }
       Spacer(modifier = Modifier.width(16.dp))
       IconButton(onClick = {}, enabled = false) {
         Icon(Icons.Filled.CameraAlt, contentDescription = "Evidence capture - coming soon", tint = AppColor.InkSecondary)
@@ -299,6 +408,15 @@ private fun WorkspaceComposer(
           text = "Evidence capture - coming soon",
           color = AppColor.InkSecondary,
           fontSize = 12.sp,
+      )
+    }
+
+    speechUiState.feedbackMessage?.let { message ->
+      Text(
+          text = message,
+          color = if (speechUiState.phase == InvestigationSpeechUiPhase.ERROR) Color(0xFFFF9B9B) else AppColor.InkSecondary,
+          fontSize = 12.sp,
+          modifier = Modifier.padding(top = 4.dp).testTag("workspace_mic_status"),
       )
     }
 

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) Meta Platforms, Inc. and affiliates.
+  All rights reserved.
+
+  This source code is licensed under the license found in the
+  LICENSE file in the root directory of this source tree.
+-->
+<!--
+  Test-only manifest. ProjectWorkspaceScreenTest hosts ProjectWorkspaceScreen directly via
+  androidx.compose.ui.test.junit4.createComposeRule() (not the real MainActivity), which runs the
+  screen inside a minimal Activity registered under this .test package rather than the app's own
+  package - so its runtime permission checks resolve against THIS manifest's declarations, not
+  the main app's. RECORD_AUDIO must be declared here for the mic button's real
+  ActivityResultContracts.RequestPermission() flow to be grantable at all in that test host.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+</manifest>

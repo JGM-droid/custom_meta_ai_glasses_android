@@ -95,6 +95,10 @@ dependencies {
   androidTestImplementation(libs.androidx.ui.test.junit4)
   androidTestImplementation(libs.androidx.test.uiautomator)
   androidTestImplementation(libs.androidx.test.rules)
+  // Required by androidx.compose.ui.test.junit4.createComposeRule() (used in
+  // ProjectWorkspaceScreenTest) to host content without a real app Activity - it merges in a
+  // plain ComponentActivity for the test APK. Debug-only: never shipped in a release build.
+  debugImplementation(libs.androidx.ui.test.manifest)
   testImplementation(libs.junit)
   testImplementation(libs.org.json)
 }
