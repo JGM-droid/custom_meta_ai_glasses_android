@@ -123,6 +123,13 @@ fun AppRoot(
         ProjectDetailScreen(
             project = screen.project,
             onBack = { topLevelScreen = TopLevelScreen.ProjectsHome },
+            // Directly enter the already-working DAT Capture/Investigation flow with THIS
+            // Project as explicit context. This is navigation only: it never calls
+            // setActiveProject(), so explicit Project attribution remains independent from the
+            // backend's global Active Project pointer.
+            onStartWorking = {
+              project -> topLevelScreen = TopLevelScreen.Capture(sourceProject = project)
+            },
             onContinueProject = { project -> topLevelScreen = TopLevelScreen.ProjectWorkspace(project) },
             modifier = modifier,
         )

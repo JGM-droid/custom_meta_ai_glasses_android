@@ -33,7 +33,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -69,6 +68,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSum
 fun ProjectDetailScreen(
     project: ProjectSummary,
     onBack: () -> Unit,
+    onStartWorking: (ProjectSummary) -> Unit,
     onContinueProject: (ProjectSummary) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: ProjectDetailViewModel =
@@ -165,14 +165,24 @@ fun ProjectDetailScreen(
         RecentActivityList(overview)
 
         Button(
-            onClick = { onContinueProject(project) },
-            modifier = Modifier.fillMaxWidth().height(52.dp).padding(vertical = 24.dp),
+            onClick = { onStartWorking(project) },
+            modifier = Modifier.fillMaxWidth().padding(top = 24.dp),
             shape = RoundedCornerShape(16.dp),
             colors =
                 ButtonDefaults.buttonColors(
                     containerColor = AppColor.Accent,
                     contentColor = AppColor.AccentInk,
                 ),
+        ) {
+          Text("Start Working with Glasses", fontWeight = FontWeight.SemiBold)
+        }
+
+        OutlinedButton(
+            onClick = { onContinueProject(project) },
+            modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 24.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors =
+                ButtonDefaults.outlinedButtonColors(contentColor = AppColor.Accent),
         ) {
           Text("Continue Project", fontWeight = FontWeight.SemiBold)
         }

@@ -495,6 +495,29 @@ class AppRootTest {
   }
 
   @Test
+  fun directStartWorkingCarriesProjectWithoutChangingActiveAndBackReturnsDetail() {
+    val activeBefore = fetchActiveProjectId()
+    val name = uniqueProjectName("DirectWork")
+    createProjectFromProjectsHome(name, "Prove direct Project work keeps explicit attribution separate from Active Project.")
+
+    waitFor("Start Working with Glasses").performScrollTo().performClick()
+    val registerLabel = composeTestRule.activity.getString(R.string.register_button_title)
+    val streamTitle = composeTestRule.activity.getString(R.string.non_stream_screen_title)
+    waitForAnyOf(hasText(registerLabel), hasText(streamTitle))
+    waitForSubstring("Capturing for $name")
+
+    // Starting Project-scoped Capture is navigation/context propagation only. It must not call
+    // PUT /projects/active or otherwise change the backend's independent global Active Project.
+    assertEquals(activeBefore, fetchActiveProjectId())
+
+    waitFor("‹ $name").performClick()
+    waitForSubstring(name)
+    waitFor("Start Working with Glasses")
+    waitFor("Continue Project")
+    composeTestRule.onNodeWithText("+ New Project").assertDoesNotExist()
+  }
+
+  @Test
   fun globalCaptureFromProjectsHomeShowsNoProjectContextAndReturnsHome() {
     waitFor("Capture / Test Glasses").performClick()
     val registerLabel = composeTestRule.activity.getString(R.string.register_button_title)
@@ -514,9 +537,7 @@ class AppRootTest {
     val nameB = uniqueProjectName("CaptureCtxB")
 
     createProjectFromProjectsHome(nameA, "Project A for capture-context isolation.")
-    waitFor("Continue Project").performClick()
-    waitForSubstring(nameA)
-    waitFor("Capture / Test Glasses").performClick()
+    waitFor("Start Working with Glasses").performScrollTo().performClick()
     waitForSubstring("Capturing for $nameA")
 
     // Back to Projects Home (via the unscoped-equivalent path is not available here - go via
@@ -525,9 +546,7 @@ class AppRootTest {
     waitFor("‹ Projects").performClick()
 
     createProjectFromProjectsHome(nameB, "Project B for capture-context isolation.")
-    waitFor("Continue Project").performClick()
-    waitForSubstring(nameB)
-    waitFor("Capture / Test Glasses").performClick()
+    waitFor("Start Working with Glasses").performScrollTo().performClick()
 
     // B's own Capture context - never A's, even though A's Capture context was shown moments
     // earlier in the same app session.
@@ -535,6 +554,7 @@ class AppRootTest {
     composeTestRule.onNodeWithText(nameA, substring = true).assertDoesNotExist()
     waitFor("‹ $nameB").performClick()
     waitForSubstring(nameB)
+    waitFor("Start Working with Glasses")
     waitFor("Continue Project")
   }
 
