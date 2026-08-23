@@ -78,6 +78,10 @@ fun NewProjectScreen(
   LaunchedEffect(submitState) {
     val state = submitState
     if (state is NewProjectSubmitState.Succeeded) {
+      // Consume before navigating - this ViewModel is Activity-scoped and would otherwise
+      // replay this exact stale Succeeded value (and re-fire onCreated with THIS project) the
+      // next time this screen is remounted to create a different Project.
+      viewModel.acknowledgeSuccess()
       onCreated(state.project)
     }
   }

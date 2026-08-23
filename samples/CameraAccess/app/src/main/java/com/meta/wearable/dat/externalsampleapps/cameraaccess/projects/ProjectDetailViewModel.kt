@@ -10,6 +10,17 @@
 //
 // Scoped to a single projectId (passed explicitly through AppRoot navigation state, never
 // inferred/guessed). Same Loading/Loaded/Error shape as ProjectsViewModel.
+//
+// Active Project (Work on this Project / Stop Working on Project): VIEWING this project
+// (loadOverview) never changes which Project is Active - opening a screen must never have a side
+// effect on backend Active state. setActiveProject/clearActiveProject are the only two calls
+// that mutate it, and both are explicit user actions. Their own in-flight/error state is tracked
+// separately in activeActionState rather than folded into uiState, specifically so that a failed
+// activate/deactivate leaves the already-loaded overview and its isActive flag exactly as they
+// were (see Phase 5/6 of the Active Project slice: never fake a change locally if the backend
+// call fails) - the screen shows an inline error instead of losing the loaded content. On
+// success, isActive is always re-derived from a fresh loadOverview() fetch rather than flipped
+// locally, since the backend remains the sole source of truth for Active state.
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.projects
 
@@ -29,9 +40,19 @@ import kotlinx.coroutines.withContext
 sealed interface ProjectDetailUiState {
   data object Loading : ProjectDetailUiState
 
-  data class Loaded(val overview: ProjectOverview) : ProjectDetailUiState
+  /** isActive: whether THIS project is the backend's Active Project - not this project's own status. */
+  data class Loaded(val overview: ProjectOverview, val isActive: Boolean) : ProjectDetailUiState
 
   data class Error(val message: String) : ProjectDetailUiState
+}
+
+/** Tracks the in-flight/error state of setActiveProject/clearActiveProject specifically. */
+sealed interface ActiveProjectActionState {
+  data object Idle : ActiveProjectActionState
+
+  data object InProgress : ActiveProjectActionState
+
+  data class Failed(val message: String) : ActiveProjectActionState
 }
 
 class ProjectDetailViewModel(
@@ -56,6 +77,9 @@ class ProjectDetailViewModel(
   private val _uiState = MutableStateFlow<ProjectDetailUiState>(ProjectDetailUiState.Loading)
   val uiState: StateFlow<ProjectDetailUiState> = _uiState.asStateFlow()
 
+  private val _activeActionState = MutableStateFlow<ActiveProjectActionState>(ActiveProjectActionState.Idle)
+  val activeActionState: StateFlow<ActiveProjectActionState> = _activeActionState.asStateFlow()
+
   init {
     loadOverview()
   }
@@ -65,10 +89,54 @@ class ProjectDetailViewModel(
     viewModelScope.launch {
       try {
         val overview = withContext(Dispatchers.IO) { repository.getProjectOverview(projectId) }
-        _uiState.update { ProjectDetailUiState.Loaded(overview) }
+        // Same "don't fail the whole screen over a secondary read" reasoning as
+        // ProjectsViewModel: if this specific fetch fails, treat it as "not Active" rather than
+        // losing the overview that already loaded successfully.
+        val activeProjectId = withContext(Dispatchers.IO) {
+          try {
+            repository.getActiveProject()?.projectId
+          } catch (exc: Exception) {
+            null
+          }
+        }
+        _uiState.update { ProjectDetailUiState.Loaded(overview, isActive = activeProjectId == projectId) }
       } catch (exc: Exception) {
         _uiState.update {
           ProjectDetailUiState.Error(exc.message ?: "Could not reach the backend.")
+        }
+      }
+    }
+  }
+
+  /** "Work on this Project". Duplicate presses while already in flight are ignored. */
+  fun setActiveProject() {
+    if (_activeActionState.value is ActiveProjectActionState.InProgress) return
+    _activeActionState.update { ActiveProjectActionState.InProgress }
+    viewModelScope.launch {
+      try {
+        withContext(Dispatchers.IO) { repository.setActiveProject(projectId) }
+        _activeActionState.update { ActiveProjectActionState.Idle }
+        loadOverview()
+      } catch (exc: Exception) {
+        _activeActionState.update {
+          ActiveProjectActionState.Failed(exc.message ?: "Could not reach the backend.")
+        }
+      }
+    }
+  }
+
+  /** "Stop Working on Project". Duplicate presses while already in flight are ignored. */
+  fun clearActiveProject() {
+    if (_activeActionState.value is ActiveProjectActionState.InProgress) return
+    _activeActionState.update { ActiveProjectActionState.InProgress }
+    viewModelScope.launch {
+      try {
+        withContext(Dispatchers.IO) { repository.clearActiveProject() }
+        _activeActionState.update { ActiveProjectActionState.Idle }
+        loadOverview()
+      } catch (exc: Exception) {
+        _activeActionState.update {
+          ActiveProjectActionState.Failed(exc.message ?: "Could not reach the backend.")
         }
       }
     }

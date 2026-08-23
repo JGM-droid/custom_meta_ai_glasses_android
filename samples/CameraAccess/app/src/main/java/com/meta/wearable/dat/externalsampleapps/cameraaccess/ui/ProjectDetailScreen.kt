@@ -49,14 +49,17 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ActiveProjectActionState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailUiState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectOverview
@@ -83,6 +86,7 @@ fun ProjectDetailScreen(
         ),
 ) {
   val uiState by viewModel.uiState.collectAsState()
+  val activeActionState by viewModel.activeActionState.collectAsState()
 
   Column(
       modifier =
@@ -135,6 +139,12 @@ fun ProjectDetailScreen(
           }
       is ProjectDetailUiState.Loaded -> {
         val overview = state.overview
+        ActiveProjectControl(
+            isActive = state.isActive,
+            actionState = activeActionState,
+            onWorkOnProject = viewModel::setActiveProject,
+            onStopWorking = viewModel::clearActiveProject,
+        )
         ProjectSection(
             title = "Where We Left Off",
             body = overview.checkpoint.whereWeLeftOff ?: "No current work recorded.",
@@ -167,6 +177,65 @@ fun ProjectDetailScreen(
           Text("Continue Project", fontWeight = FontWeight.SemiBold)
         }
       }
+    }
+  }
+}
+
+// Deliberately consumer-facing wording only ("Work on this Project" / "Stop Working on
+// Project") - never exposes backend terminology like ActiveProjectPointer. isActive reflects
+// whether THIS viewed project is the backend's one Active Project; it is never assumed true just
+// because the user opened this screen (VIEWING a project never implies it is ACTIVE).
+@Composable
+private fun ActiveProjectControl(
+    isActive: Boolean,
+    actionState: ActiveProjectActionState,
+    onWorkOnProject: () -> Unit,
+    onStopWorking: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+  val isInProgress = actionState is ActiveProjectActionState.InProgress
+
+  Column(modifier = modifier.padding(top = 16.dp)) {
+    if (isActive) {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(AppColor.Success))
+        Text(
+            text = "Active Project",
+            color = AppColor.Success,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(start = 6.dp),
+        )
+      }
+    }
+
+    OutlinedButton(
+        onClick = if (isActive) onStopWorking else onWorkOnProject,
+        enabled = !isInProgress,
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors =
+            ButtonDefaults.outlinedButtonColors(
+                contentColor = if (isActive) AppColor.InkSecondary else AppColor.Accent,
+            ),
+    ) {
+      if (isInProgress) {
+        CircularProgressIndicator(color = AppColor.Accent, modifier = Modifier.size(18.dp))
+      } else {
+        Text(
+            text = if (isActive) "Stop Working on Project" else "Work on this Project",
+            fontWeight = FontWeight.SemiBold,
+        )
+      }
+    }
+
+    val failure = actionState as? ActiveProjectActionState.Failed
+    if (failure != null) {
+      Text(
+          text = failure.message,
+          color = Color(0xFFFF9B9B),
+          modifier = Modifier.padding(top = 8.dp),
+      )
     }
   }
 }

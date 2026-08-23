@@ -42,6 +42,23 @@ interface ProjectRepository {
    * error rather than assuming success.
    */
   suspend fun createProject(request: NewProjectRequest): ProjectSummary
+
+  /**
+   * The backend's one Active Project (see docs/PROJECT_MEMORY_ARCHITECTURE.md), or null if none
+   * is currently set - a normal state, not an error. This is distinct from which Project a
+   * screen is merely viewing: opening a Project never calls setActiveProject.
+   */
+  suspend fun getActiveProject(): ProjectSummary?
+
+  /**
+   * Makes this Project the backend's Active Project; the previous Active Project (if any) loses
+   * that status. Throws on failure - the caller must leave canonical state unchanged rather than
+   * assuming success.
+   */
+  suspend fun setActiveProject(projectId: String): ProjectSummary
+
+  /** Clears the Active Project. Idempotent. Throws on failure. */
+  suspend fun clearActiveProject()
 }
 
 /** Production repository: reads/creates real Project Memory data via the FastAPI backend. */
@@ -55,6 +72,13 @@ class HttpUrlProjectRepository(
 
   override suspend fun createProject(request: NewProjectRequest): ProjectSummary =
       api.createProject(request)
+
+  override suspend fun getActiveProject(): ProjectSummary? = api.getActiveProject()
+
+  override suspend fun setActiveProject(projectId: String): ProjectSummary =
+      api.setActiveProject(projectId)
+
+  override suspend fun clearActiveProject() = api.clearActiveProject()
 }
 
 /**
@@ -106,6 +130,8 @@ class MockProjectRepository : ProjectRepository {
           .associateBy { it.project.projectId }
           .toMutableMap()
 
+  private var activeProjectId: String? = null
+
   override suspend fun listProjects(): List<ProjectSummary> = overviews.values.map { it.project }
 
   override suspend fun getProjectOverview(projectId: String): ProjectOverview =
@@ -123,5 +149,19 @@ class MockProjectRepository : ProjectRepository {
         recentActivity = emptyList(),
     )
     return summary
+  }
+
+  override suspend fun getActiveProject(): ProjectSummary? =
+      activeProjectId?.let { overviews[it]?.project }
+
+  override suspend fun setActiveProject(projectId: String): ProjectSummary {
+    val project = overviews[projectId]?.project
+        ?: throw NoSuchElementException("No mock project state for $projectId")
+    activeProjectId = projectId
+    return project
+  }
+
+  override suspend fun clearActiveProject() {
+    activeProjectId = null
   }
 }

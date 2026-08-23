@@ -15,6 +15,14 @@
 //
 // Duplicate-press safe: submit() is a no-op while already Submitting. A failed submission leaves
 // the state as Failed (not stuck/disabled) so the form remains editable and retryable.
+//
+// This ViewModel is Activity-scoped (viewModel(factory=...) with no explicit key, same as
+// ProjectsViewModel), so it survives being unmounted/remounted every time AppRoot navigates away
+// from and back to TopLevelScreen.NewProject - e.g. creating a second Project in the same app
+// session. NewProjectScreen's LaunchedEffect(submitState) must consume a Succeeded value via
+// acknowledgeSuccess() the moment it fires onCreated, or the SAME stale Succeeded(projectA) would
+// still be sitting in this StateFlow the next time the screen remounts, firing onCreated(projectA)
+// again immediately (before the user can even fill in Project B's form).
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.projects
 
@@ -101,6 +109,17 @@ class NewProjectViewModel(
   /** Lets the screen return to an editable state after showing an error, without losing it. */
   fun dismissError() {
     if (_submitState.value is NewProjectSubmitState.Failed) {
+      _submitState.update { NewProjectSubmitState.Idle }
+    }
+  }
+
+  /**
+   * Must be called once the screen has acted on a Succeeded value (i.e. right before/as it calls
+   * onCreated). Resets to Idle so this Activity-scoped ViewModel can't replay a stale success the
+   * next time the New Project screen is remounted for a later Project.
+   */
+  fun acknowledgeSuccess() {
+    if (_submitState.value is NewProjectSubmitState.Succeeded) {
       _submitState.update { NewProjectSubmitState.Idle }
     }
   }

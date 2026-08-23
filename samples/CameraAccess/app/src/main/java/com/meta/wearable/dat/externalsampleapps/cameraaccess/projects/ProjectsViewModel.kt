@@ -30,7 +30,13 @@ import kotlinx.coroutines.withContext
 sealed interface ProjectsHomeUiState {
   data object Loading : ProjectsHomeUiState
 
-  data class Loaded(val projects: List<ProjectSummary>) : ProjectsHomeUiState
+  /**
+   * activeProjectId is the backend's Active Project (see ProjectRepository.getActiveProject),
+   * not derived from any Project's own lifecycle `status` field - a Project's status can be
+   * "active" (vs. e.g. archived) without it being THE Active Project the user is working on.
+   * Null means no Project is currently Active; no row should show the Active indicator.
+   */
+  data class Loaded(val projects: List<ProjectSummary>, val activeProjectId: String?) : ProjectsHomeUiState
 
   data class Error(val message: String) : ProjectsHomeUiState
 }
@@ -66,7 +72,18 @@ class ProjectsViewModel(
     viewModelScope.launch {
       try {
         val projects = withContext(Dispatchers.IO) { repository.listProjects() }
-        _uiState.update { ProjectsHomeUiState.Loaded(projects) }
+        // The Active Project indicator is a secondary, read-only affordance on top of the
+        // project list - a failure fetching it should not take down the whole screen (the list
+        // itself already succeeded), so it degrades to "no indicator shown" rather than an Error
+        // state.
+        val activeProjectId = withContext(Dispatchers.IO) {
+          try {
+            repository.getActiveProject()?.projectId
+          } catch (exc: Exception) {
+            null
+          }
+        }
+        _uiState.update { ProjectsHomeUiState.Loaded(projects, activeProjectId) }
       } catch (exc: Exception) {
         _uiState.update {
           ProjectsHomeUiState.Error(exc.message ?: "Could not reach the backend.")

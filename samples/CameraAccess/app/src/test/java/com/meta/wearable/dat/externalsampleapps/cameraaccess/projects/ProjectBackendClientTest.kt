@@ -197,6 +197,112 @@ class ProjectBackendClientTest {
   }
 
   @Test
+  fun getActiveProjectParsesBackendResponseWhenSet() {
+    val recorder = RequestRecorder(
+        createdProjectResponseBody(id = "77777777-7777-7777-7777-777777777777", name = "Upstairs AC Repair", status = "active"),
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    val active = runBlockingTest { api.getActiveProject() }
+
+    assertEquals("GET", recorder.connection.requestMethod)
+    assertEquals("/projects/active", recorder.connection.url.path)
+    assertEquals("77777777-7777-7777-7777-777777777777", active?.projectId)
+    assertEquals("Upstairs AC Repair", active?.name)
+  }
+
+  @Test
+  fun getActiveProjectReturnsNullWhenNoneIsSetRatherThanThrowing() {
+    val recorder = RequestRecorder(
+        body = """{"detail":{"category":"active_project_not_set","message":"No active project is currently selected."}}""",
+        code = 404,
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    // No Active Project is a normal state, not an error - callers must not have to catch an
+    // exception just to render "nothing is Active".
+    val active = runBlockingTest { api.getActiveProject() }
+
+    assertNull(active)
+  }
+
+  @Test
+  fun getActiveProjectPropagatesOtherBackendErrors() {
+    val recorder = RequestRecorder(
+        body = """{"detail":{"category":"project_storage_error","message":"Project storage is unavailable."}}""",
+        code = 500,
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    try {
+      runBlockingTest { api.getActiveProject() }
+      fail("Expected ProjectApiException for a non-'not set' failure")
+    } catch (exc: ProjectApiException) {
+      assertEquals(500, exc.code)
+      assertEquals("project_storage_error", exc.category)
+    }
+  }
+
+  @Test
+  fun setActiveProjectSendsPutToCanonicalProjectId() {
+    val recorder = RequestRecorder(
+        createdProjectResponseBody(id = "88888888-8888-8888-8888-888888888888", name = "Lanyard Construction Website", status = "active"),
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    val activated = runBlockingTest { api.setActiveProject("88888888-8888-8888-8888-888888888888") }
+
+    assertEquals("PUT", recorder.connection.requestMethod)
+    assertEquals("/projects/active/88888888-8888-8888-8888-888888888888", recorder.connection.url.path)
+    assertEquals("88888888-8888-8888-8888-888888888888", activated.projectId)
+  }
+
+  @Test
+  fun setActiveProjectWithUnknownIdThrowsProjectNotFound() {
+    val recorder = RequestRecorder(
+        body = """{"detail":{"category":"project_not_found","message":"Project does not exist."}}""",
+        code = 404,
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    try {
+      runBlockingTest { api.setActiveProject("00000000-0000-0000-0000-000000000000") }
+      fail("Expected ProjectApiException")
+    } catch (exc: ProjectApiException) {
+      assertEquals(404, exc.code)
+      assertEquals("project_not_found", exc.category)
+    }
+  }
+
+  @Test
+  fun clearActiveProjectSendsDeleteAndSucceedsOnEmptyBody() {
+    val recorder = RequestRecorder(body = "", code = 204)
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    // Must not throw despite the empty 204 body - unlike the JSON-returning endpoints, no parse
+    // is attempted here.
+    runBlockingTest { api.clearActiveProject() }
+
+    assertEquals("DELETE", recorder.connection.requestMethod)
+    assertEquals("/projects/active", recorder.connection.url.path)
+  }
+
+  @Test
+  fun activeProjectNetworkFailurePropagatesRatherThanCrashing() {
+    val api = HttpUrlProjectApi(
+        baseUrl = "http://10.0.2.2:8001",
+        connectionFactory = { throw java.io.IOException("Unable to resolve host") },
+    )
+
+    try {
+      runBlockingTest { api.setActiveProject("11111111-1111-1111-1111-111111111111") }
+      fail("Expected an IOException to propagate")
+    } catch (exc: java.io.IOException) {
+      assertEquals("Unable to resolve host", exc.message)
+    }
+  }
+
+  @Test
   fun notFoundResponseThrowsWithBackendErrorCategory() {
     val recorder = RequestRecorder(
         body = """{"detail":{"category":"project_not_found","message":"Project does not exist."}}""",

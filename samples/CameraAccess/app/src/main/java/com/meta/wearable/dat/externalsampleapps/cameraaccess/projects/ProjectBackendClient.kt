@@ -11,15 +11,21 @@
 // Mirrors investigation/InvestigationBackendClient.kt's HttpURLConnection conventions (same
 // request/response/error-parsing shape, same backend error contract:
 // {"detail": {"category": ..., "message": ...}}) applied to the Project endpoints this app uses:
-//   GET  /projects                         -> list[ProjectSummary]
-//   GET  /projects/{project_id}             -> Project (identity + checkpoint)
-//   GET  /projects/{project_id}/activities  -> list[ProjectActivity]
-//   POST /projects                          -> Project (create; the ONLY mutating call here)
+//   GET    /projects                         -> list[ProjectSummary]
+//   GET    /projects/{project_id}             -> Project (identity + checkpoint)
+//   GET    /projects/{project_id}/activities  -> list[ProjectActivity]
+//   POST   /projects                          -> Project (create)
+//   GET    /projects/active                   -> Project, or 404 {category: active_project_not_set}
+//   PUT    /projects/active/{project_id}      -> Project (that project becomes Active)
+//   DELETE /projects/active                   -> 204 (idempotent; no active project is not an error)
 //
 // This is a standalone client, not a refactor of the Investigation client - the Investigation
 // networking code is left untouched. createProject sends exactly the backend's
 // ProjectCreateRequest shape (name, goal, optional checkpoint.current_objective/next_action) -
-// no invented fields, no second creation model.
+// no invented fields, no second creation model. The Active Project endpoints are the backend's
+// existing single global pointer (see projects/project_store.py ActiveProjectPointer) - this
+// client neither invents new endpoints nor keeps a second, Android-owned notion of which Project
+// is Active.
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.projects
 
@@ -36,6 +42,15 @@ interface ProjectApi {
   suspend fun getProjectOverview(projectId: String): ProjectOverview
 
   suspend fun createProject(request: NewProjectRequest): ProjectSummary
+
+  /** Null means no Active Project is currently set - a normal state, not an error. */
+  suspend fun getActiveProject(): ProjectSummary?
+
+  /** Makes this the backend's one Active Project; the previous Active Project loses that status. */
+  suspend fun setActiveProject(projectId: String): ProjectSummary
+
+  /** Clears the Active Project pointer. Idempotent - succeeds even if nothing was Active. */
+  suspend fun clearActiveProject()
 }
 
 internal class ProjectApiException(val code: Int, val category: String, override val message: String) :
@@ -90,6 +105,23 @@ internal class HttpUrlProjectApi(
     return response.toProjectSummary()
   }
 
+  override suspend fun getActiveProject(): ProjectSummary? {
+    return try {
+      executeJsonObject(path = "/projects/active").toProjectSummary()
+    } catch (exc: ProjectApiException) {
+      if (exc.category == "active_project_not_set") null else throw exc
+    }
+  }
+
+  override suspend fun setActiveProject(projectId: String): ProjectSummary {
+    val response = executeJsonObject(path = "/projects/active/${normalizeId(projectId)}", method = "PUT")
+    return response.toProjectSummary()
+  }
+
+  override suspend fun clearActiveProject() {
+    executeNoContent(path = "/projects/active", method = "DELETE")
+  }
+
   private fun JSONObject.toProjectSummary(): ProjectSummary =
       ProjectSummary(
           projectId = getString("project_id"),
@@ -111,6 +143,17 @@ internal class HttpUrlProjectApi(
   private fun executeJsonArray(path: String): JSONArray {
     val connection = openConnection(path)
     return connection.useJsonResponse { responseBody -> JSONArray(responseBody) }
+  }
+
+  /** For endpoints whose success response has no body (e.g. 204), so no JSON parse is attempted. */
+  private fun executeNoContent(path: String, method: String) {
+    val connection = openConnection(path, method = method)
+    val code = connection.responseCode
+    if (code !in 200..299) {
+      val body = connection.errorStream?.use { input -> input.readBytes().toString(StandardCharsets.UTF_8) }.orEmpty()
+      val error = parseApiError(body)
+      throw ProjectApiException(code = code, category = error.first, message = error.second)
+    }
   }
 
   private fun openConnection(path: String, method: String = "GET", body: String? = null): HttpURLConnection {

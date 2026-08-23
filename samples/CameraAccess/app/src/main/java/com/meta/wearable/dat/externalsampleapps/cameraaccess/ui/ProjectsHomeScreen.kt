@@ -166,6 +166,7 @@ fun ProjectsHomeScreen(
                 itemsIndexed(state.projects, key = { _, project -> project.projectId }) { index, project ->
                   ProjectRow(
                       project,
+                      isActive = project.projectId == state.activeProjectId,
                       onClick = { onOpenProject(project) },
                       // Index-based, not content-based: lets instrumented tests select "the
                       // first/second row" against real backend data without hardcoding names.
@@ -222,6 +223,7 @@ private fun ProjectsHomeMessage(
 @Composable
 private fun ProjectRow(
     project: ProjectSummary,
+    isActive: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -242,7 +244,10 @@ private fun ProjectRow(
             fontSize = 16.sp,
             fontWeight = FontWeight.Medium,
         )
-        if (project.status.equals("active", ignoreCase = true)) {
+        // Driven by the backend's Active Project pointer (state.activeProjectId), never by
+        // project.status - a Project's own lifecycle status can be "active" without it being THE
+        // Active Project the user is currently working on.
+        if (isActive) {
           Row(
               verticalAlignment = Alignment.CenterVertically,
               modifier = Modifier.padding(top = 4.dp),

@@ -15,6 +15,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -26,6 +27,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import java.io.IOException
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -54,6 +56,24 @@ import org.junit.runner.RunWith
  *   new project is visible after returning to a freshly-refreshed Projects Home alongside the
  *   projects that already existed.
  * - "Capture / Test Glasses" still reaches the existing, unmodified Meta camera/capture flow.
+ *
+ * Active Project (real PUT/GET/DELETE /projects/active against the backend's one global Active
+ * Project pointer - see docs/PROJECT_MEMORY_ARCHITECTURE.md):
+ * - a newly-created Project is never automatically Active ("Work on this Project" shows, not
+ *   "Active Project").
+ * - pressing "Work on this Project" makes it Active (Project Detail switches to "Active Project"
+ *   / "Stop Working on Project"), Projects Home then shows its Active indicator, and pressing
+ *   "Stop Working on Project" clears it end to end.
+ * - VIEWING a Project is never the same as it being ACTIVE: opening/viewing a second Project
+ *   never calls setActiveProject - the first Project remains Active (on both its own Detail
+ *   screen, if revisited, and on Projects Home) until the user explicitly presses "Work on this
+ *   Project" on the second one, at which point the backend's single Active Project pointer moves
+ *   and the first Project visibly loses its Active status everywhere.
+ *
+ * Because the backend's Active Project pointer is a single global value (not per-test-run), these
+ * tests always drive every Active-state transition they depend on explicitly through the UI
+ * (never assuming "nothing is Active" as a starting condition) and identify projects/rows by the
+ * unique name each test itself created, never by an assumption about the ambient global state.
  *
  * Tests that create a Project use a timestamped unique name (see uniqueProjectName) so repeated
  * physical-device runs never collide/confuse each other in the shared dev backend.
@@ -219,6 +239,124 @@ class AppRootTest {
     waitForSubstring(previousTopProject)
   }
 
+  @Test
+  fun newlyCreatedProjectIsNotActiveButCanBeWorkedOnThenStopped() {
+    val uniqueName = uniqueProjectName("Active")
+    createProjectFromProjectsHome(uniqueName, "Prove Active Project set/clear from Project Detail.")
+
+    // Just created - never automatically Active (Phase 9).
+    waitFor("Work on this Project")
+    composeTestRule.onNodeWithText("Active Project").assertDoesNotExist()
+
+    waitFor("Work on this Project").performClick()
+    waitFor("Active Project")
+    waitFor("Stop Working on Project")
+
+    // Projects Home reflects it too - this project was just created, so it's project_row_0.
+    waitFor("‹ Projects").performClick()
+    waitForTag("project_row_0")
+    assertTrue(
+        "Expected the just-created, just-activated project's row to show the Active indicator",
+        allTextOf(composeTestRule.onNodeWithTag("project_row_0")).contains("Active"),
+    )
+
+    // Re-open it - the Active state came from a fresh backend fetch, not a locally-cached flag.
+    composeTestRule.onNodeWithTag("project_row_0").performClick()
+    waitForSubstring(uniqueName)
+    waitFor("Active Project")
+
+    waitFor("Stop Working on Project").performClick()
+    waitFor("Work on this Project")
+    composeTestRule.onNodeWithText("Active Project").assertDoesNotExist()
+
+    waitFor("‹ Projects").performClick()
+    waitForTag("project_row_0")
+    assertTrue(
+        "Expected no Active indicator anywhere on Projects Home after Stop Working",
+        allTextOf(composeTestRule.onNodeWithTag("project_row_0")).none { it == "Active" },
+    )
+  }
+
+  @Test
+  fun viewingAnotherProjectNeverChangesBackendActiveProjectUntilExplicitlyWorkedOn() {
+    val nameA = uniqueProjectName("SwitchA")
+    val nameB = uniqueProjectName("SwitchB")
+
+    createProjectFromProjectsHome(nameA, "Project A for the viewing-vs-active proof.")
+    waitFor("Work on this Project").performClick()
+    waitFor("Active Project")
+
+    waitFor("‹ Projects").performClick()
+    val rowA = waitForRowIndexOfProject(nameA)
+    assertTrue(
+        "Expected Project A's row to show Active right after activating it",
+        allTextOf(composeTestRule.onNodeWithTag("project_row_$rowA")).contains("Active"),
+    )
+
+    // Creating and opening Project B must not touch the backend Active Project.
+    waitFor("+ New Project").performClick()
+    waitFor("Create New Project")
+    fillField("e.g. Garage Door Sensor", nameB)
+    fillField("What are you trying to accomplish?", "Project B for the viewing-vs-active proof.")
+    waitFor("Create Project").performClick()
+    waitForSubstring(nameB)
+    // B is merely being viewed - not Active, and A is not visible from here to leak into it.
+    waitFor("Work on this Project")
+    composeTestRule.onNodeWithText("Active Project").assertDoesNotExist()
+
+    waitFor("‹ Projects").performClick()
+    val rowB = waitForRowIndexOfProject(nameB)
+    assertTrue(
+        "Expected Project B's row to NOT show Active - it was only viewed, never worked on",
+        allTextOf(composeTestRule.onNodeWithTag("project_row_$rowB")).none { it == "Active" },
+    )
+    val rowAAfterViewingB = waitForRowIndexOfProject(nameA)
+    assertTrue(
+        "Expected Project A to remain Active on Projects Home after merely viewing Project B",
+        allTextOf(composeTestRule.onNodeWithTag("project_row_$rowAAfterViewingB")).contains("Active"),
+    )
+
+    // Now explicitly work on B - the backend's single Active Project pointer moves A -> B.
+    composeTestRule.onNodeWithTag("project_row_$rowB").performClick()
+    waitForSubstring(nameB)
+    waitFor("Work on this Project").performClick()
+    waitFor("Active Project")
+
+    waitFor("‹ Projects").performClick()
+    val rowBAfterSwitch = waitForRowIndexOfProject(nameB)
+    assertTrue(
+        "Expected Project B to be Active on Projects Home after switching",
+        allTextOf(composeTestRule.onNodeWithTag("project_row_$rowBAfterSwitch")).contains("Active"),
+    )
+    val rowAAfterSwitch = waitForRowIndexOfProject(nameA)
+    assertTrue(
+        "Expected Project A to have lost Active status once B became Active",
+        allTextOf(composeTestRule.onNodeWithTag("project_row_$rowAAfterSwitch")).none { it == "Active" },
+    )
+  }
+
+  /** Drives the full "+ New Project" form from Projects Home; leaves the caller on the new Project's Detail screen. */
+  private fun createProjectFromProjectsHome(name: String, goal: String) {
+    waitFor("+ New Project").performClick()
+    waitFor("Create New Project")
+    fillField("e.g. Garage Door Sensor", name)
+    fillField("What are you trying to accomplish?", goal)
+    waitFor("Create Project").performClick()
+    waitForSubstring(name)
+  }
+
+  /** Scans project_row_0..N on the CURRENT Projects Home composition for the row whose name matches. */
+  private fun waitForRowIndexOfProject(name: String, maxRows: Int = 20): Int {
+    waitForTag("project_row_0")
+    for (index in 0 until maxRows) {
+      val tag = "project_row_$index"
+      if (composeTestRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isEmpty()) break
+      if (firstTextOf(composeTestRule.onNodeWithTag(tag)) == name) return index
+    }
+    fail("Could not find a Projects Home row for \"$name\" within the first $maxRows rows")
+    error("unreachable")
+  }
+
   private fun fillField(placeholder: String, value: String) {
     waitFor(placeholder).performTextInput(value)
   }
@@ -258,6 +396,13 @@ class AppRootTest {
     val node = interaction.fetchSemanticsNode()
     val textList = node.config.getOrElse(SemanticsProperties.Text) { emptyList() }
     return textList.firstOrNull()?.text.orEmpty()
+  }
+
+  /** All merged text strings on a node - e.g. a project row shows [name, "Active"] when that
+   * row's project is the backend's Active Project, or just [name] otherwise. */
+  private fun allTextOf(interaction: SemanticsNodeInteraction): List<String> {
+    val node = interaction.fetchSemanticsNode()
+    return node.config.getOrElse(SemanticsProperties.Text) { emptyList() }.map { it.text }
   }
 
   private fun grantPermissions() {
