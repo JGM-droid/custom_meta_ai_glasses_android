@@ -32,7 +32,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
@@ -73,7 +72,7 @@ fun HomeScreen(
       Icon(
           painter = painterResource(id = R.drawable.camera_access_icon),
           contentDescription = stringResource(R.string.camera_access_icon_description),
-          tint = AppColor.DeepBlue,
+          tint = AppColor.Accent,
           modifier = Modifier.size(80.dp * LocalDensity.current.density),
       )
       Column(
@@ -105,7 +104,7 @@ fun HomeScreen(
       // App Registration Button
       Text(
           text = stringResource(R.string.home_redirect_message),
-          color = Color.Gray,
+          color = AppColor.InkSecondary,
           textAlign = TextAlign.Center,
           modifier = Modifier.padding(horizontal = 24.dp),
       )
@@ -143,7 +142,7 @@ private fun TipItem(
           fontSize = 20.sp,
           fontWeight = FontWeight.SemiBold,
       )
-      Text(text = text, color = Color.Gray)
+      Text(text = text, color = AppColor.InkSecondary)
     }
   }
 }

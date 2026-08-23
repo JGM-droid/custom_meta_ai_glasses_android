@@ -32,10 +32,10 @@ fun SwitchButton(
       colors =
           ButtonDefaults.buttonColors(
               containerColor =
-                  if (isDestructive) AppColor.DestructiveBackground else AppColor.DeepBlue,
+                  if (isDestructive) AppColor.DestructiveBackground else AppColor.Accent,
               disabledContainerColor = Color.Gray,
               disabledContentColor = Color.DarkGray,
-              contentColor = if (isDestructive) AppColor.DestructiveForeground else Color.White,
+              contentColor = if (isDestructive) AppColor.DestructiveForeground else AppColor.AccentInk,
           ),
       enabled = enabled,
   ) {

@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2" project="cameraaccess">
 
+    <!-- App identity -->
+    <string name="app_name" description="Visible application name">Project Assistant</string>
+
     <!-- Home Screen -->
     <string name="register_button_title" description="Connect App">Connect my glasses</string>
     <string name="unregister_button_title" description="Disconnect App">Disconnect</string>
@@ -20,14 +23,14 @@
     <string name="live_stream" description="Live Stream">Live stream</string>
 
     <!-- Non Stream Screen -->
-    <string name="camera_access_icon_description" description="Camera Access icon description">Camera Access icon</string>
+    <string name="camera_access_icon_description" description="Camera Access icon description">Project Assistant icon</string>
     <string name="non_stream_screen_description" description="Non stream screen description">Tap the Start streaming button to stream video from your glasses or use the camera button to take a photo from your glasses.</string>
     <string name="non_stream_screen_title" description="Non stream screen title">Stream Your Glasses Camera</string>
     <string name="waiting_for_active_device" description="Waiting for active device message">Waiting for an active device</string>
     <string name="update_required_title" description="Update required warning title">Update required</string>
-    <string name="update_required_firmware_message" description="Firmware update required warning">Your glasses firmware needs an update before Camera Access can start.</string>
-    <string name="update_required_dat_app_message" description="DAT app update required warning">The app on your glasses needs an update before Camera Access can start.</string>
-    <string name="update_required_both_message" description="Firmware and DAT app update required warning">Your glasses firmware and app need updates before Camera Access can start.</string>
+    <string name="update_required_firmware_message" description="Firmware update required warning">Your glasses firmware needs an update before Project Assistant can start.</string>
+    <string name="update_required_dat_app_message" description="DAT app update required warning">The app on your glasses needs an update before Project Assistant can start.</string>
+    <string name="update_required_both_message" description="Firmware and DAT app update required warning">Your glasses firmware and app need updates before Project Assistant can start.</string>
 
     <!-- SharePhotoDialog -->
     <string name="photo_captured" description="Photo Captured">Photo Captured</string>
@@ -67,14 +70,14 @@
     <string name="unfolded" description="Unfolded toggle label">Unfolded</string>
 
     <!-- Camera Permission Alert -->
-    <string name="camera_permission_alert_title" description="Camera permission alert title">Camera Access Required</string>
+    <string name="camera_permission_alert_title" description="Camera permission alert title">Camera Permission Required</string>
     <string name="camera_permission_alert_message" description="Camera permission alert message">Camera access was denied. Please enable it in Settings to use the camera source.</string>
     <string name="camera_permission_open_settings" description="Camera permission open settings button">Open Settings</string>
     <string name="camera_permission_cancel" description="Camera permission cancel button">Cancel</string>
 
     <!-- Getting Started Sheet -->
     <string name="getting_started_title" description="Getting Started sheet title">Getting started</string>
-    <string name="getting_started_tip_permission" description="Tip about camera permission">First, Camera Access needs permission to use your glasses camera.</string>
+    <string name="getting_started_tip_permission" description="Tip about camera permission">First, Project Assistant needs permission to use your glasses camera.</string>
     <string name="getting_started_tip_led" description="Tip about capture LED">The capture LED lets others know when you\'re capturing content or going live.</string>
     <string name="getting_started_tip_photo" description="Tip about photo capture">Capture photos by tapping the camera button.</string>
     <string name="getting_started_continue" description="Continue button">Continue</string>

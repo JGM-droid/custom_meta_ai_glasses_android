@@ -42,6 +42,10 @@ class RegistrationButtonTest {
   @Before
   fun setup() {
     grantPermissions()
+    // The app now launches into Projects Home (AppRoot) instead of directly into the Meta
+    // CameraAccess flow - enter the capture sub-flow first so this test's "Connect my glasses"
+    // assertion still applies unchanged.
+    composeTestRule.onNodeWithText("Capture / Test Glasses").performClick()
   }
 
   @Test

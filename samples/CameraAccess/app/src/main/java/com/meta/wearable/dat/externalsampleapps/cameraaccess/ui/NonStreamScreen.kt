@@ -89,7 +89,7 @@ fun NonStreamScreen(
 
   MaterialTheme(colorScheme = darkColorScheme()) {
     Box(
-        modifier = modifier.fillMaxSize().background(Color.Black).padding(all = 24.dp),
+        modifier = modifier.fillMaxSize().background(AppColor.Graphite).padding(all = 24.dp),
         contentAlignment = Alignment.Center,
     ) {
       Box(modifier = Modifier.align(Alignment.TopEnd).systemBarsPadding()) {

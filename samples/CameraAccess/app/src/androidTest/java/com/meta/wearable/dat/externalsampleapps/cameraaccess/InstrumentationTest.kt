@@ -58,6 +58,10 @@ class InstrumentationTest {
   @Before
   fun setup() {
     grantPermissions()
+    // The app now launches into Projects Home (AppRoot) instead of directly into the Meta
+    // CameraAccess flow - enter the capture sub-flow first so the rest of this suite's
+    // assertions against HomeScreen/NonStreamScreen/StreamScreen still apply unchanged.
+    composeTestRule.onNodeWithText("Capture / Test Glasses").performClick()
   }
 
   @After
