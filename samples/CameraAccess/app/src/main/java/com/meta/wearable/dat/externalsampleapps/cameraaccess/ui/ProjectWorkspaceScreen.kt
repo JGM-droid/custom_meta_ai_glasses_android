@@ -28,11 +28,23 @@
 //
 // Project Actions exposes exactly one real action - "Capture / Test Glasses", reusing the exact
 // same Capture entry point Projects Home already offers (no project-scoped capture attribution
-// is implemented yet - see AppRoot). "Ask Project" is intentionally NOT present: no Android Ask
-// path exists yet anywhere in this app, and inventing a button for it would be fake
-// functionality. The composer's microphone/camera affordances are visually reserved but disabled
-// - they represent later inline capture-while-typing, not a shortcut into the full-screen Capture
-// flow (that already has its own clearly-labeled entry point in Project Actions).
+// is implemented yet - see AppRoot). The composer's microphone/camera affordances are visually
+// reserved but disabled - they represent later inline capture-while-typing, not a shortcut into
+// the full-screen Capture flow (that already has its own clearly-labeled entry point in Project
+// Actions).
+//
+// Ask Project (Project-Aware Ask): the composer is now a real interaction, not just draft text.
+// "Ask Project" sends the typed question to the backend's existing, read-only
+// POST /projects/{project_id}/ask via ProjectDetailViewModel.askProject - always THIS Workspace's
+// own project.projectId, never the separate Active Project pointer (see ActiveProjectControl
+// above; the two are deliberately independent). The primary UI only ever shows the plain answer
+// text under a "PROJECT ASSISTANT" heading - question_class/grounding_status/references/
+// provider/model_call_count are preserved on ProjectAskAnswer for a possible future debug/Details
+// view but are never surfaced here, matching the product goal of feeling like "I asked my
+// Project a question" rather than exposing backend Q&A internals. Submitting a question never
+// touches the composer text destructively on failure (the question stays editable for retry) and
+// is cleared only once a real answer comes back, so there is nothing to "premature-clear" on the
+// unhappy path.
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 
@@ -53,9 +65,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -66,6 +80,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -74,6 +89,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -81,6 +97,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectActivityEntry
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectAskAnswer
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectAskState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailUiState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
@@ -106,11 +124,22 @@ fun ProjectWorkspaceScreen(
 ) {
   val uiState by viewModel.uiState.collectAsState()
   val activeActionState by viewModel.activeActionState.collectAsState()
+  val askState by viewModel.askState.collectAsState()
 
-  // Draft-only: never sent to the backend, never becomes Project Memory. Reset whenever this
-  // composable is instantiated fresh for a different project_id (a brand-new `remember` scope),
-  // so Project A's typed draft can never bleed into Project B's Workspace.
+  // Composer text - reset whenever this composable is instantiated fresh for a different
+  // project_id (a brand-new `remember` scope), so Project A's typed question can never bleed
+  // into Project B's Workspace. askState itself is scoped per-project too, since viewModel is
+  // keyed by project.projectId below - a brand-new ProjectDetailViewModel (and Idle askState)
+  // is created per distinct Project automatically.
   var draftText by remember(project.projectId) { mutableStateOf("") }
+
+  // Cleared only once a real answer comes back - never on submit (nothing to lose if it fails)
+  // and never on failure (the question must stay editable for retry).
+  LaunchedEffect(askState) {
+    if (askState is ProjectAskState.Answered) {
+      draftText = ""
+    }
+  }
 
   Column(
       modifier =
@@ -177,7 +206,17 @@ fun ProjectWorkspaceScreen(
             body = overview.checkpoint.nextAction ?: "No next action recorded.",
         )
 
-        WorkspaceComposer(text = draftText, onTextChange = { draftText = it })
+        WorkspaceComposer(
+            text = draftText,
+            onTextChange = { draftText = it },
+            askState = askState,
+            onAskProject = { viewModel.askProject(draftText) },
+        )
+
+        val answeredState = askState as? ProjectAskState.Answered
+        if (answeredState != null) {
+          AskAnswerCard(question = answeredState.question, answer = answeredState.answer)
+        }
 
         WorkspaceActions(onOpenCapture = onOpenCapture)
 
@@ -193,8 +232,14 @@ fun ProjectWorkspaceScreen(
 private fun WorkspaceComposer(
     text: String,
     onTextChange: (String) -> Unit,
+    askState: ProjectAskState,
+    onAskProject: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+  val isSubmitting = askState is ProjectAskState.Submitting
+  // Whitespace-only input can never submit - trimmed the same way the ViewModel itself checks.
+  val canSubmit = text.isNotBlank() && !isSubmitting
+
   Column(modifier = modifier.padding(top = 28.dp)) {
     Text(
         text = "WHAT ARE YOU WORKING ON?",
@@ -206,18 +251,28 @@ private fun WorkspaceComposer(
     OutlinedTextField(
         value = text,
         onValueChange = onTextChange,
-        placeholder = { Text("Type what you're working on...", color = AppColor.InkSecondary) },
+        // Not editable while a question is in flight - keeps exactly what was asked visible and
+        // unambiguous for the duration of the request, matching what the backend actually
+        // received. Failure re-enables editing automatically (isSubmitting becomes false).
+        enabled = !isSubmitting,
+        placeholder = { Text("Ask your Project anything...", color = AppColor.InkSecondary) },
         minLines = 3,
+        // Capped rather than unbounded - a very long question scrolls inside the field instead of
+        // growing it indefinitely (the backend's own question limit is 1000 characters anyway).
+        maxLines = 6,
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag("workspace_composer_input"),
         shape = RoundedCornerShape(16.dp),
         colors =
             OutlinedTextFieldDefaults.colors(
                 focusedTextColor = AppColor.InkPrimary,
                 unfocusedTextColor = AppColor.InkPrimary,
+                disabledTextColor = AppColor.InkPrimary,
                 focusedContainerColor = AppColor.Surface,
                 unfocusedContainerColor = AppColor.Surface,
+                disabledContainerColor = AppColor.Surface,
                 focusedBorderColor = AppColor.Accent,
                 unfocusedBorderColor = AppColor.Surface,
+                disabledBorderColor = AppColor.Surface,
                 cursorColor = AppColor.Accent,
             ),
     )
@@ -246,6 +301,62 @@ private fun WorkspaceComposer(
           fontSize = 12.sp,
       )
     }
+
+    Button(
+        onClick = onAskProject,
+        enabled = canSubmit,
+        modifier = Modifier.fillMaxWidth().height(52.dp).padding(top = 12.dp).testTag("workspace_ask_button"),
+        shape = RoundedCornerShape(16.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = AppColor.Accent, contentColor = AppColor.AccentInk),
+    ) {
+      if (isSubmitting) {
+        CircularProgressIndicator(color = AppColor.AccentInk, modifier = Modifier.size(20.dp))
+      } else {
+        Text("Ask Project", fontWeight = FontWeight.SemiBold)
+      }
+    }
+
+    val failure = askState as? ProjectAskState.Failed
+    if (failure != null) {
+      Text(
+          text = failure.message,
+          color = Color(0xFFFF9B9B),
+          modifier = Modifier.padding(top = 10.dp).testTag("workspace_ask_error"),
+      )
+    }
+  }
+}
+
+@Composable
+private fun AskAnswerCard(question: String, answer: ProjectAskAnswer, modifier: Modifier = Modifier) {
+  Column(
+      modifier =
+          modifier
+              .fillMaxWidth()
+              .padding(top = 20.dp)
+              .clip(RoundedCornerShape(16.dp))
+              .background(AppColor.Surface)
+              .padding(16.dp)
+              .testTag("workspace_ask_answer"),
+  ) {
+    Text(
+        text = "\"$question\"",
+        color = AppColor.InkSecondary,
+        fontSize = 13.sp,
+    )
+    Text(
+        text = "PROJECT ASSISTANT",
+        color = AppColor.Accent,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 1.sp,
+        modifier = Modifier.padding(top = 10.dp),
+    )
+    Text(
+        text = answer.answer,
+        color = AppColor.InkPrimary,
+        modifier = Modifier.padding(top = 6.dp),
+    )
   }
 }
 

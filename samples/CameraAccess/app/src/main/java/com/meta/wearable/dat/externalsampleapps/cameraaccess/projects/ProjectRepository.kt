@@ -59,6 +59,14 @@ interface ProjectRepository {
 
   /** Clears the Active Project. Idempotent. Throws on failure. */
   suspend fun clearActiveProject()
+
+  /**
+   * Asks the given Project (its own canonical project_id - never the Active Project unless they
+   * happen to be the same) a question via the backend's existing, read-only Project Q&A route.
+   * Throws on validation/network/backend failure - the caller keeps the question editable and
+   * surfaces the error rather than assuming an answer. Never mutates Project state.
+   */
+  suspend fun askProject(projectId: String, question: String): ProjectAskAnswer
 }
 
 /** Production repository: reads/creates real Project Memory data via the FastAPI backend. */
@@ -79,6 +87,9 @@ class HttpUrlProjectRepository(
       api.setActiveProject(projectId)
 
   override suspend fun clearActiveProject() = api.clearActiveProject()
+
+  override suspend fun askProject(projectId: String, question: String): ProjectAskAnswer =
+      api.askProject(projectId, question)
 }
 
 /**
@@ -163,5 +174,20 @@ class MockProjectRepository : ProjectRepository {
 
   override suspend fun clearActiveProject() {
     activeProjectId = null
+  }
+
+  override suspend fun askProject(projectId: String, question: String): ProjectAskAnswer {
+    val overview = overviews[projectId] ?: throw NoSuchElementException("No mock project state for $projectId")
+    return ProjectAskAnswer(
+        answer = "Mock answer for ${overview.project.name}: $question",
+        questionClass = "mock",
+        groundingStatus = "grounded",
+        insufficientContext = false,
+        uncertaintyNote = null,
+        referenceSummaries = emptyList(),
+        provider = null,
+        providerModel = null,
+        modelCallCount = 1,
+    )
   }
 }

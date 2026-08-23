@@ -18,6 +18,7 @@
 //   GET    /projects/active                   -> Project, or 404 {category: active_project_not_set}
 //   PUT    /projects/active/{project_id}      -> Project (that project becomes Active)
 //   DELETE /projects/active                   -> 204 (idempotent; no active project is not an error)
+//   POST   /projects/{project_id}/ask         -> ProjectGroundedAnswerResponse (read-only Q&A)
 //
 // This is a standalone client, not a refactor of the Investigation client - the Investigation
 // networking code is left untouched. createProject sends exactly the backend's
@@ -25,7 +26,11 @@
 // no invented fields, no second creation model. The Active Project endpoints are the backend's
 // existing single global pointer (see projects/project_store.py ActiveProjectPointer) - this
 // client neither invents new endpoints nor keeps a second, Android-owned notion of which Project
-// is Active.
+// is Active. askProject sends exactly the backend's ProjectAskRequest shape (question only) to
+// the existing Project Q&A route (see projects/project_qa.py ProjectQuestionAnsweringService) -
+// this client performs no retrieval/reasoning of its own; the backend's context retriever and AI
+// provider do all of that. That route is read-only (confirmed by inspection - it never calls into
+// PROJECT_STORE/PROJECT_ACTIVITY_STORE), so this client adds no separate mutation around it.
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.projects
 
@@ -51,6 +56,9 @@ interface ProjectApi {
 
   /** Clears the Active Project pointer. Idempotent - succeeds even if nothing was Active. */
   suspend fun clearActiveProject()
+
+  /** Read-only: asks THIS project's real backend Q&A route a question. Never mutates Project state. */
+  suspend fun askProject(projectId: String, question: String): ProjectAskAnswer
 }
 
 internal class ProjectApiException(val code: Int, val category: String, override val message: String) :
@@ -120,6 +128,30 @@ internal class HttpUrlProjectApi(
 
   override suspend fun clearActiveProject() {
     executeNoContent(path = "/projects/active", method = "DELETE")
+  }
+
+  override suspend fun askProject(projectId: String, question: String): ProjectAskAnswer {
+    val bodyJson = JSONObject().apply { put("question", question) }
+    val response = executeJsonObject(path = "/projects/${normalizeId(projectId)}/ask", method = "POST", body = bodyJson.toString())
+
+    val referencesJson = response.optJSONArray("references")
+    val referenceSummaries = if (referencesJson != null) {
+      (0 until referencesJson.length()).map { index -> referencesJson.getJSONObject(index).getString("summary") }
+    } else {
+      emptyList()
+    }
+
+    return ProjectAskAnswer(
+        answer = response.getString("answer"),
+        questionClass = response.getString("question_class"),
+        groundingStatus = response.getString("grounding_status"),
+        insufficientContext = response.optBoolean("insufficient_context", false),
+        uncertaintyNote = response.optNullableString("uncertainty_note"),
+        referenceSummaries = referenceSummaries,
+        provider = response.optNullableString("provider"),
+        providerModel = response.optNullableString("provider_model"),
+        modelCallCount = response.optInt("model_call_count", 1),
+    )
   }
 
   private fun JSONObject.toProjectSummary(): ProjectSummary =

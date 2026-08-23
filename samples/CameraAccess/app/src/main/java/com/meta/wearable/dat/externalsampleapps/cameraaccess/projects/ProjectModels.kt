@@ -64,3 +64,25 @@ data class NewProjectRequest(
     val currentObjective: String? = null,
     val nextAction: String? = null,
 )
+
+/**
+ * A grounded answer from POST /projects/{project_id}/ask - mirrors ProjectGroundedAnswerResponse.
+ * project_id/project_name/question are deliberately NOT carried here: the caller already knows
+ * the canonical project_id it asked (see ProjectRepository.askProject) and tracks the question
+ * text itself, so echoing the backend's copies back would just be a second, redundant identity.
+ * `answer` is the only field the primary Workspace UI renders; the rest is preserved for a
+ * possible future debug/Details view but must never dominate the normal product experience (see
+ * the Project-Aware Ask slice - the UI must never surface raw backend terms like "grounding
+ * status" or "question class" in the main answer presentation).
+ */
+data class ProjectAskAnswer(
+    val answer: String,
+    val questionClass: String,
+    val groundingStatus: String,
+    val insufficientContext: Boolean,
+    val uncertaintyNote: String?,
+    val referenceSummaries: List<String>,
+    val provider: String?,
+    val providerModel: String?,
+    val modelCallCount: Int,
+)

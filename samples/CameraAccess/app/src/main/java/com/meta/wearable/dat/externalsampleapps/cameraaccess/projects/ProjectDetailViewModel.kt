@@ -21,6 +21,18 @@
 // call fails) - the screen shows an inline error instead of losing the loaded content. On
 // success, isActive is always re-derived from a fresh loadOverview() fetch rather than flipped
 // locally, since the backend remains the sole source of truth for Active state.
+//
+// Ask Project (Project-Aware Ask): askProject always targets `projectId` - the Project this
+// ViewModel instance was constructed for (i.e. whichever Project the Workspace is explicitly
+// showing), NEVER the backend's separate Active Project pointer. This ViewModel is already keyed
+// by project_id at the viewModel(key = ...) call site in both ProjectDetailScreen and
+// ProjectWorkspaceScreen, so a brand-new instance (and brand-new askState, defaulting to Idle) is
+// created per distinct Project automatically - one Project's in-flight/answered/failed Ask state
+// can never bleed into another's. askState is intentionally separate from uiState/
+// activeActionState: a failed or in-flight Ask must never disturb the already-loaded checkpoint
+// or Active indicator. The backend's own /ask route is read-only (see
+// projects/project_qa.py ProjectQuestionAnsweringService.ask - no PROJECT_STORE/
+// PROJECT_ACTIVITY_STORE writes), so askProject adds no mutation of its own around it.
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.projects
 
@@ -55,6 +67,19 @@ sealed interface ActiveProjectActionState {
   data class Failed(val message: String) : ActiveProjectActionState
 }
 
+/** Tracks one in-flight/answered/failed Ask Project question. The question text is kept
+ * alongside the result so the UI can show what was asked next to its answer/error, and so a
+ * failed attempt can be retried without the user having to retype it. */
+sealed interface ProjectAskState {
+  data object Idle : ProjectAskState
+
+  data class Submitting(val question: String) : ProjectAskState
+
+  data class Answered(val question: String, val answer: ProjectAskAnswer) : ProjectAskState
+
+  data class Failed(val question: String, val message: String) : ProjectAskState
+}
+
 class ProjectDetailViewModel(
     application: Application,
     private val projectId: String,
@@ -79,6 +104,9 @@ class ProjectDetailViewModel(
 
   private val _activeActionState = MutableStateFlow<ActiveProjectActionState>(ActiveProjectActionState.Idle)
   val activeActionState: StateFlow<ActiveProjectActionState> = _activeActionState.asStateFlow()
+
+  private val _askState = MutableStateFlow<ProjectAskState>(ProjectAskState.Idle)
+  val askState: StateFlow<ProjectAskState> = _askState.asStateFlow()
 
   init {
     loadOverview()
@@ -139,6 +167,35 @@ class ProjectDetailViewModel(
           ActiveProjectActionState.Failed(exc.message ?: "Could not reach the backend.")
         }
       }
+    }
+  }
+
+  /**
+   * Asks THIS Project (projectId, never the Active Project) a question via the backend's
+   * existing read-only Q&A route. Blank/whitespace-only questions and duplicate presses while
+   * already in flight are both silently ignored - the Workspace composer's own "Ask Project"
+   * button is disabled in both cases, so this is defense-in-depth, not a user-visible error path.
+   */
+  fun askProject(question: String) {
+    val trimmed = question.trim()
+    if (trimmed.isEmpty()) return
+    if (_askState.value is ProjectAskState.Submitting) return
+
+    _askState.update { ProjectAskState.Submitting(trimmed) }
+    viewModelScope.launch {
+      try {
+        val answer = withContext(Dispatchers.IO) { repository.askProject(projectId, trimmed) }
+        _askState.update { ProjectAskState.Answered(trimmed, answer) }
+      } catch (exc: Exception) {
+        _askState.update { ProjectAskState.Failed(trimmed, exc.message ?: "Could not reach the backend.") }
+      }
+    }
+  }
+
+  /** Returns to Idle after a failed Ask, so the composer can be edited/resubmitted cleanly. */
+  fun dismissAskError() {
+    if (_askState.value is ProjectAskState.Failed) {
+      _askState.update { ProjectAskState.Idle }
     }
   }
 }

@@ -6,6 +6,7 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -303,6 +304,109 @@ class ProjectBackendClientTest {
   }
 
   @Test
+  fun askProjectSendsQuestionToCanonicalProjectIdEndpoint() {
+    val recorder = RequestRecorder(askResponseBody())
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    runBlockingTest { api.askProject("11111111-1111-1111-1111-111111111111", "What should I check next?") }
+
+    assertEquals("POST", recorder.connection.requestMethod)
+    assertEquals("/projects/11111111-1111-1111-1111-111111111111/ask", recorder.connection.url.path)
+    assertEquals(
+        "application/json; charset=utf-8",
+        recorder.connection.customHeaders["Content-Type"],
+    )
+
+    val sentBody = JSONObject(recorder.connection.output.toString(StandardCharsets.UTF_8.name()))
+    // Exactly the canonical ProjectAskRequest shape - question only, nothing else invented.
+    assertEquals(setOf("question"), sentBody.keyNames())
+    assertEquals("What should I check next?", sentBody.getString("question"))
+  }
+
+  @Test
+  fun askProjectParsesAnswerAsPrimaryField() {
+    val recorder = RequestRecorder(askResponseBody(answer = "Check the contactor for control voltage."))
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    val result = runBlockingTest { api.askProject("11111111-1111-1111-1111-111111111111", "What next?") }
+
+    assertEquals("Check the contactor for control voltage.", result.answer)
+  }
+
+  @Test
+  fun askProjectPreservesMetadataFieldsWithoutSurfacingThemAsTheAnswer() {
+    val recorder = RequestRecorder(
+        askResponseBody(
+            answer = "Real answer text.",
+            questionClass = "next_action",
+            groundingStatus = "grounded",
+            provider = "openai",
+            providerModel = "gpt-4.1-mini",
+            modelCallCount = 1,
+        ),
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    val result = runBlockingTest { api.askProject("11111111-1111-1111-1111-111111111111", "What next?") }
+
+    assertEquals("next_action", result.questionClass)
+    assertEquals("grounded", result.groundingStatus)
+    assertEquals("openai", result.provider)
+    assertEquals("gpt-4.1-mini", result.providerModel)
+    assertEquals(1, result.modelCallCount)
+    assertEquals(listOf("Next action: Capture photos of the wiring harness."), result.referenceSummaries)
+  }
+
+  @Test
+  fun askProjectValidationErrorThrowsWithBackendCategory() {
+    val recorder = RequestRecorder(
+        body = """{"detail":{"category":"validation_error","message":"question is required."}}""",
+        code = 422,
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    try {
+      runBlockingTest { api.askProject("11111111-1111-1111-1111-111111111111", "") }
+      fail("Expected ProjectApiException")
+    } catch (exc: ProjectApiException) {
+      assertEquals(422, exc.code)
+      assertEquals("validation_error", exc.category)
+    }
+  }
+
+  @Test
+  fun askProjectProviderUnavailableThrowsWithBackendCategory() {
+    val recorder = RequestRecorder(
+        body = """{"detail":{"category":"project_qa_provider_unavailable","message":"Project Q&A provider is unavailable."}}""",
+        code = 503,
+    )
+    val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)
+
+    try {
+      runBlockingTest { api.askProject("11111111-1111-1111-1111-111111111111", "What next?") }
+      fail("Expected ProjectApiException")
+    } catch (exc: ProjectApiException) {
+      assertEquals(503, exc.code)
+      assertEquals("project_qa_provider_unavailable", exc.category)
+    }
+  }
+
+  @Test
+  fun askProjectNetworkFailurePropagatesRatherThanCrashing() {
+    val api = HttpUrlProjectApi(
+        baseUrl = "http://10.0.2.2:8001",
+        connectionFactory = { throw java.io.IOException("Unable to resolve host") },
+    )
+
+    try {
+      runBlockingTest { api.askProject("11111111-1111-1111-1111-111111111111", "What next?") }
+      fail("Expected an IOException to propagate")
+    } catch (exc: java.io.IOException) {
+      assertEquals("Unable to resolve host", exc.message)
+    }
+  }
+
+  @Test
   fun notFoundResponseThrowsWithBackendErrorCategory() {
     val recorder = RequestRecorder(
         body = """{"detail":{"category":"project_not_found","message":"Project does not exist."}}""",
@@ -409,6 +513,33 @@ private fun createdProjectResponseBody(id: String, name: String, status: String)
       "revision":0,
       "created_at_utc":"2026-08-22T22:00:00Z",
       "updated_at_utc":"2026-08-22T22:00:00Z"
+    }
+    """.trimIndent()
+
+private fun askResponseBody(
+    answer: String = "Capture photos of the wiring harness as the next action.",
+    questionClass: String = "next_action",
+    groundingStatus: String = "grounded",
+    provider: String = "openai",
+    providerModel: String = "gpt-4.1-mini",
+    modelCallCount: Int = 1,
+): String =
+    """
+    {
+      "project_id":"11111111-1111-1111-1111-111111111111",
+      "project_name":"Test Project",
+      "question":"What should I check next?",
+      "question_class":"$questionClass",
+      "answer":"$answer",
+      "grounding_status":"$groundingStatus",
+      "insufficient_context":false,
+      "uncertainty_note":null,
+      "fallback_used":true,
+      "selected_context_summary":["question_class=$questionClass"],
+      "references":[{"source_kind":"checkpoint","source_id":null,"summary":"Next action: Capture photos of the wiring harness.","evidence_status":"reported"}],
+      "provider":"$provider",
+      "provider_model":"$providerModel",
+      "model_call_count":$modelCallCount
     }
     """.trimIndent()
 

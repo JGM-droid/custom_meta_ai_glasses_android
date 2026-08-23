@@ -12,6 +12,8 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -21,7 +23,10 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
@@ -117,6 +122,11 @@ class AppRootTest {
 
   companion object {
     private const val BACKEND_TIMEOUT_MS = 20_000L
+
+    // A real Ask Project request round-trips through the backend's context retriever AND an
+    // actual OpenAI call - meaningfully slower than the plain CRUD calls BACKEND_TIMEOUT_MS is
+    // sized for.
+    private const val ASK_TIMEOUT_MS = 45_000L
   }
 
   @get:Rule val composeTestRule = createAndroidComposeRule<MainActivity>()
@@ -459,6 +469,105 @@ class AppRootTest {
     val streamTitle = composeTestRule.activity.getString(R.string.non_stream_screen_title)
     waitForAnyOf(hasText(registerLabel), hasText(streamTitle))
     composeTestRule.onNodeWithText("Capture / Test Glasses").assertDoesNotExist()
+  }
+
+  @Test
+  fun askProjectRequiresNonBlankInputAndDoesNotChangeCanonicalProjectState() {
+    val name = uniqueProjectName("Ask")
+    val distinctiveNextAction = "Inspect the QRX7 capacitor housing."
+    createProjectFromProjectsHome(name, "Prove Project-Aware Ask end to end.", nextAction = distinctiveNextAction)
+    val projectId = mostRecentlyCreatedProjectId()
+    val activeBeforeAsk = fetchActiveProjectId()
+
+    waitFor("Continue Project").performClick()
+    waitForSubstring(name)
+
+    // Blank/whitespace-only input can never submit - the button stays disabled either way.
+    val askButton = composeTestRule.onNodeWithTag("workspace_ask_button")
+    askButton.assertIsNotEnabled()
+    val composer = composeTestRule.onNodeWithTag("workspace_composer_input")
+    composer.performTextInput("   ")
+    askButton.assertIsNotEnabled()
+    composer.performTextClearance()
+
+    // Real end-to-end question against the real backend /ask route.
+    val question = "What should I check next?"
+    composer.performTextInput(question)
+    askButton.assertIsEnabled()
+    askButton.performClick()
+
+    composeTestRule.waitUntilExactlyOneExists(hasTestTag("workspace_ask_answer"), timeoutMillis = ASK_TIMEOUT_MS)
+    waitForSubstring(question)
+    // Grounded in THIS Project's own distinctive next_action, not a fabricated/generic answer.
+    waitForSubstring("QRX7")
+
+    // Absolutely no memory mutation: checkpoint/revision/Active Project all unchanged by the ask.
+    val projectAfterAsk = fetchProjectJson(projectId)
+    assertEquals(0, projectAfterAsk.getInt("revision"))
+    assertNull(
+        "Ask must never write checkpoint.current_work",
+        projectAfterAsk.getJSONObject("checkpoint").opt("current_work")?.takeIf { it != JSONObject.NULL },
+    )
+    assertEquals(activeBeforeAsk, fetchActiveProjectId())
+  }
+
+  @Test
+  fun askProjectAnswersAreIsolatedPerProjectWorkspaceAndFailedAskAllowsRetry() {
+    val nameA = uniqueProjectName("AskA")
+    val nameB = uniqueProjectName("AskB")
+    createProjectFromProjectsHome(nameA, "Project A for Ask isolation.", nextAction = "Inspect the QRX7 capacitor housing.")
+    waitFor("Continue Project").performClick()
+    waitForSubstring(nameA)
+
+    val question = "What should I check next?"
+    fillField("Ask your Project anything...", question)
+    composeTestRule.onNodeWithTag("workspace_ask_button").performClick()
+    composeTestRule.waitUntilExactlyOneExists(hasTestTag("workspace_ask_answer"), timeoutMillis = ASK_TIMEOUT_MS)
+    waitForSubstring("QRX7")
+
+    waitFor("‹ Overview").performClick()
+    waitFor("‹ Projects").performClick()
+
+    createProjectFromProjectsHome(nameB, "Project B for Ask isolation.", nextAction = "Verify the ZKP9 login callback.")
+    waitFor("Continue Project").performClick()
+    waitForSubstring(nameB)
+
+    // A fresh Workspace for a different Project starts with NO answer at all - A's answer never
+    // leaks in just from navigating here, before B has ever been asked anything.
+    composeTestRule.onNodeWithTag("workspace_ask_answer").assertDoesNotExist()
+    composeTestRule.onNodeWithText("QRX7", substring = true).assertDoesNotExist()
+
+    // A failed Ask (backend validation_error - question over the backend's 1000-char limit,
+    // never reaches the model, so this costs no model call) must leave the question editable
+    // for retry rather than clearing it.
+    // performTextReplacement (not performTextInput) - sets the value in one action rather than
+    // simulating 1000+ individual keystrokes. Uses real words with spaces (not one giant
+    // unbroken token) so Compose's text layout has normal line-break points.
+    val tooLong = "word ".repeat(201)
+    val composerB = composeTestRule.onNodeWithTag("workspace_composer_input")
+    composerB.performTextReplacement(tooLong)
+    composeTestRule.onNodeWithTag("workspace_ask_button").performClick()
+    composeTestRule.waitUntilExactlyOneExists(hasTestTag("workspace_ask_error"), timeoutMillis = ASK_TIMEOUT_MS)
+    composeTestRule.onNodeWithTag("workspace_composer_input").assertTextContains("word word word", substring = true)
+    composeTestRule.onNodeWithTag("workspace_ask_button").assertIsEnabled()
+
+    // Retry with a valid question - proves the failed attempt didn't lock the composer, and this
+    // is B's own real Ask, isolated from A: grounded in B's own distinctive next_action.
+    composeTestRule.onNodeWithTag("workspace_composer_input").performTextReplacement(question)
+    composeTestRule.onNodeWithTag("workspace_ask_button").performClick()
+    composeTestRule.waitUntilExactlyOneExists(hasTestTag("workspace_ask_answer"), timeoutMillis = ASK_TIMEOUT_MS)
+    waitForSubstring("ZKP9")
+    composeTestRule.onNodeWithText("QRX7", substring = true).assertDoesNotExist()
+
+    // Capture / Test Glasses remains reachable from an Ask-active Workspace - the answer card
+    // above pushes it further down the scrollable screen than usual, so scroll it into view
+    // first (performClick() alone can miss a node that's currently off-screen).
+    val captureButton = waitFor("Capture / Test Glasses")
+    captureButton.performScrollTo()
+    captureButton.performClick()
+    val registerLabel = composeTestRule.activity.getString(R.string.register_button_title)
+    val streamTitle = composeTestRule.activity.getString(R.string.non_stream_screen_title)
+    waitForAnyOf(hasText(registerLabel), hasText(streamTitle))
   }
 
   /** Drives the full "+ New Project" form from Projects Home; leaves the caller on the new Project's Detail screen. */
