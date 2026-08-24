@@ -28,7 +28,27 @@ class SavedInvestigationProjectDetailContractTest {
     assertTrue(client.contains("/projects/\${normalizeId(projectId)}/checkpoint-proposals/\${normalizeId(proposalId)}/apply"))
     assertTrue(client.contains("/projects/\${normalizeId(projectId)}/checkpoint-proposals/\${normalizeId(proposalId)}/reject"))
     assertTrue(viewModel.contains("loadOverview()"))
+    assertTrue(client.contains("/projects/\$normalizedProjectId/checkpoint-proposals"))
+    assertTrue(client.contains("filter { it.status == \"pending\" }"))
+    assertTrue(viewModel.contains("A lost response may follow a successful backend mutation"))
     assertFalse(viewModel.contains("setActiveProject(projectId, proposalId"))
+  }
+
+  @Test
+  fun allPendingProposalsAndMoreEvidenceContinuationAreRecoverable() {
+    val models = File(root, "projects/ProjectModels.kt").readText()
+    val screen = File(root, "ui/ProjectDetailScreen.kt").readText()
+    val appRoot = File(root, "ui/AppRoot.kt").readText()
+    val investigationViewModel = File(root, "investigation/InvestigationSessionDebugViewModel.kt").readText()
+    assertTrue(models.contains("val pendingProposals: List<CheckpointProposalReview>"))
+    assertTrue(models.contains("val followUpSessionId: String?"))
+    assertTrue(screen.contains("proposals.forEach"))
+    assertTrue(screen.contains("Resume More Evidence"))
+    assertTrue(appRoot.contains("rememberSaveable"))
+    assertTrue(appRoot.contains("continuationSessionId"))
+    assertTrue(investigationViewModel.contains("SavedStateHandle"))
+    assertTrue(investigationViewModel.contains("investigation_session_id"))
+    assertTrue(investigationViewModel.contains("investigation_image_uri_"))
   }
 
   @Test

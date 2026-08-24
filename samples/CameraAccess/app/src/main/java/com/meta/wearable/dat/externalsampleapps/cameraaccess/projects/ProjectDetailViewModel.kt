@@ -228,6 +228,9 @@ class ProjectDetailViewModel(
         loadOverview()
       } catch (exc: Exception) {
         _proposalActionState.value = ProposalActionState.Failed(exc.message ?: "Could not update the proposal.")
+        // A lost response may follow a successful backend mutation. Reconstruct from the
+        // canonical Project/proposal state instead of assuming the mutation failed.
+        loadOverview()
       }
     }
   }

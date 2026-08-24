@@ -74,6 +74,7 @@ fun CameraAccessScaffold(
     // eventual Investigation submission can attribute to the right Project.
     sourceProjectId: String? = null,
     sourceProjectName: String? = null,
+    continuationSessionId: String? = null,
     onReturnToSourceProject: (() -> Unit)? = null,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -96,6 +97,7 @@ fun CameraAccessScaffold(
                 wearablesViewModel = viewModel,
                 sourceProjectId = sourceProjectId,
                 sourceProjectName = sourceProjectName,
+                continuationSessionId = continuationSessionId,
                 onReturnToSourceProject = onReturnToSourceProject,
             )
         uiState.isRegistered ->
@@ -153,7 +155,7 @@ fun CameraAccessScaffold(
               onDismissRequest = { viewModel.hideDebugMenu() },
               sheetState = bottomSheetState,
           ) {
-            MockDeviceKitScreen(modifier = Modifier.fillMaxWidth(), sourceProjectId = sourceProjectId)
+            MockDeviceKitScreen(modifier = Modifier.fillMaxWidth(), sourceProjectId = sourceProjectId, continuationSessionId = continuationSessionId)
           }
         }
       }

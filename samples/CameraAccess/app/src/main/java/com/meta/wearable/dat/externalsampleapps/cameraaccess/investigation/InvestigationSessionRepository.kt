@@ -150,6 +150,45 @@ internal class InvestigationSessionRepository(
           draft.continuationSessionId?.let { getSession(it) }
               ?: createSession(clientMetadata = draft.clientMetadata, projectId = draft.projectId)
 
+      // If Analyze succeeded but its response was lost, the canonical session may already be
+      // finalizing, analyzing, or complete. Reconcile it before uploading or creating anything.
+      if (draft.continuationSessionId != null && session.status in setOf(
+              BackendSessionStatus.FINALIZING,
+              BackendSessionStatus.ANALYZING,
+              BackendSessionStatus.COMPLETED,
+          )) {
+        val canonical = if (session.status == BackendSessionStatus.COMPLETED) {
+          pollSession(session.sessionId)
+        } else {
+          pollUntilTerminal(session.sessionId, onProgress)
+        }
+        if (canonical.status == BackendSessionStatus.COMPLETED && canonical.resultAvailable && canonical.compactResult != null) {
+          val reconciledAnalyze = BackendSessionAnalyzeResponseDto(
+              sessionId = canonical.sessionId,
+              investigationId = canonical.investigationId,
+              status = canonical.status,
+              accepted = true,
+              resultAvailable = true,
+              compactResult = canonical.compactResult,
+              retryable = canonical.retryable,
+              error = canonical.error,
+              pollUrl = "/investigation-sessions/${canonical.sessionId}/poll",
+          )
+          onProgress(InvestigationSubmissionProgress(
+              clientState = InvestigationClientState.COMPLETED,
+              sessionId = canonical.sessionId,
+              backendStatus = canonical.status,
+              investigationId = canonical.investigationId,
+              compactResult = canonical.compactResult,
+              analyzeAccepted = true,
+              imageCount = canonical.imageCount,
+              explanationPresent = canonical.explanationPresent,
+              message = "Recovered canonical Investigation result.",
+          ))
+          return InvestigationSubmissionOutcome.Completed(session, reconciledAnalyze, canonical)
+        }
+      }
+
         val totalImages = draft.evidence.size
       onProgress(
           InvestigationSubmissionProgress(

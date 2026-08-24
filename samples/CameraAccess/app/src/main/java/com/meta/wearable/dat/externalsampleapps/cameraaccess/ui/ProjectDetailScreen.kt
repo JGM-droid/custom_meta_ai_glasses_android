@@ -77,6 +77,7 @@ fun ProjectDetailScreen(
     project: ProjectSummary,
     onBack: () -> Unit,
     onStartWorking: (ProjectSummary) -> Unit,
+    onResumeInvestigation: (ProjectSummary, String) -> Unit,
     onContinueProject: (ProjectSummary) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: ProjectDetailViewModel =
@@ -165,7 +166,12 @@ fun ProjectDetailScreen(
         overview.latestInvestigation?.let { investigation ->
           SavedInvestigationSection(
               investigation = investigation,
-              proposal = overview.pendingProposal,
+              onResumeFollowUp = { sessionId -> onResumeInvestigation(project, sessionId) },
+          )
+        }
+        if (overview.pendingProposals.isNotEmpty()) {
+          PendingProposalsSection(
+              proposals = overview.pendingProposals,
               actionState = proposalActionState,
               onApply = viewModel::applyProposal,
               onReject = viewModel::rejectProposal,
@@ -219,10 +225,7 @@ fun ProjectDetailScreen(
 @Composable
 private fun SavedInvestigationSection(
     investigation: SavedInvestigationReview,
-    proposal: com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.CheckpointProposalReview?,
-    actionState: ProposalActionState,
-    onApply: (String) -> Unit,
-    onReject: (String) -> Unit,
+    onResumeFollowUp: (String) -> Unit,
 ) {
   Column(
       modifier = Modifier.fillMaxWidth().padding(top = 24.dp).clip(RoundedCornerShape(16.dp))
@@ -253,21 +256,41 @@ private fun SavedInvestigationSection(
     Text("Recommended next action", color = AppColor.InkSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
     Text(investigation.recommendedNextAction, color = AppColor.InkPrimary)
     Text("Decision: ${investigation.trustDecision ?: "Not decided"}", color = AppColor.InkSecondary, modifier = Modifier.padding(top = 12.dp))
+    investigation.followUpSessionId?.let { sessionId ->
+      OutlinedButton(
+          onClick = { onResumeFollowUp(sessionId) },
+          modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+      ) { Text("Resume More Evidence") }
+    }
 
-    proposal?.let {
+  }
+}
+
+@Composable
+private fun PendingProposalsSection(
+    proposals: List<com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.CheckpointProposalReview>,
+    actionState: ProposalActionState,
+    onApply: (String) -> Unit,
+    onReject: (String) -> Unit,
+) {
+  Column(
+      modifier = Modifier.fillMaxWidth().padding(top = 16.dp).clip(RoundedCornerShape(16.dp))
+          .background(Color(0xFF24262B)).padding(16.dp),
+  ) {
+    proposals.forEach { proposal ->
       Text("PENDING PROJECT UPDATE", color = AppColor.Accent, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 20.dp))
       Text("Pending approval", color = AppColor.InkSecondary)
-      it.proposedFields.filterValues { value -> value != null }.forEach { (field, value) ->
+      proposal.proposedFields.filterValues { value -> value != null }.forEach { (field, value) ->
         Text("${field.replace('_', ' ')} → $value", color = AppColor.InkPrimary, modifier = Modifier.padding(top = 6.dp))
       }
       val busy = actionState is ProposalActionState.InProgress
       Button(
-          onClick = { onApply(it.proposalId) },
+          onClick = { onApply(proposal.proposalId) },
           enabled = !busy,
           modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
       ) { Text("Apply update") }
       OutlinedButton(
-          onClick = { onReject(it.proposalId) },
+          onClick = { onReject(proposal.proposalId) },
           enabled = !busy,
           modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
       ) { Text("Reject") }

@@ -664,6 +664,27 @@ class InvestigationSessionRepositoryTest {
   }
 
   @Test
+  fun retryWithKnownCompletedSessionReconcilesWithoutCreateUploadOrAnalyze() = runBlocking {
+    val api = FakeInvestigationSessionApi(initialSessionStatus = BackendSessionStatus.COMPLETED)
+    val repository = InvestigationSessionRepository(api = api)
+
+    val outcome = repository.submitInvestigation(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("one.jpg")),
+            explanationText = "response was lost",
+            projectId = "11111111-1111-1111-1111-111111111111",
+            continuationSessionId = FakeInvestigationSessionApi.SESSION_ID,
+        ),
+    )
+
+    assertTrue(outcome is InvestigationSubmissionOutcome.Completed)
+    assertEquals(listOf("poll"), api.callTrace)
+    assertEquals(0, api.createSessionCalls)
+    assertEquals(0, api.uploadedImageFilenames.size)
+    assertEquals(0, api.analyzeCalls)
+  }
+
+  @Test
   fun trustDecisionIsProjectScopedAndUsesExistingApi() = runBlocking {
     val api = FakeInvestigationSessionApi()
     val repository = InvestigationSessionRepository(api = api)
@@ -704,6 +725,7 @@ private class FakeInvestigationSessionApi(
     private val analyzeException: Exception? = null,
     private val analyzeResponse: BackendSessionAnalyzeResponseDto = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()),
     private val pollResponses: MutableList<BackendPollingResponseDto> = mutableListOf(),
+    initialSessionStatus: BackendSessionStatus = BackendSessionStatus.CREATED,
 ) : InvestigationSessionApi {
   companion object {
     const val SESSION_ID = "123e4567-e89b-12d3-a456-426614174000"
@@ -722,7 +744,7 @@ private class FakeInvestigationSessionApi(
   val uploadedExplanationTexts = mutableListOf<String?>()
   val uploadedEvidenceMetadata = mutableListOf<Map<String, Any?>>()
   val callTrace = mutableListOf<String>()
-  private var currentSessionStatus: BackendSessionStatus = BackendSessionStatus.CREATED
+  private var currentSessionStatus: BackendSessionStatus = initialSessionStatus
 
   override suspend fun createSession(request: BackendSessionCreateRequestDto): BackendSessionDto {
     callTrace += "create"

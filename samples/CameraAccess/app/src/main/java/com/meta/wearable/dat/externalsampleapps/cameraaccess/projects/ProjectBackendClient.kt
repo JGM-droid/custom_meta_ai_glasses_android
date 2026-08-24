@@ -101,8 +101,16 @@ internal class HttpUrlProjectApi(
         .map { summaryText -> ProjectActivityEntry(summary = summaryText) }
 
     var investigation: SavedInvestigationReview? = null
-    var linkedProposal: CheckpointProposalReview? = null
+    var pendingProposals: List<CheckpointProposalReview> = emptyList()
     var investigationLoadError: String? = null
+    try {
+      val proposals = executeJsonArray(path = "/projects/$normalizedProjectId/checkpoint-proposals")
+      pendingProposals = (0 until proposals.length())
+          .map { proposals.getJSONObject(it).toCheckpointProposalReview() }
+          .filter { it.status == "pending" }
+    } catch (exc: ProjectApiException) {
+      investigationLoadError = exc.message
+    }
     try {
       val sessions = executeJsonArray(path = "/projects/$normalizedProjectId/investigation-sessions")
       val latestSession = (0 until sessions.length())
@@ -125,10 +133,6 @@ internal class HttpUrlProjectApi(
       val explanation = (0 until evidence.length()).map { evidence.getJSONObject(it) }
           .firstNotNullOfOrNull { it.optNullableString("normalized_text") }
       val proposalId = trust.optNullableString("checkpoint_proposal_id")
-      if (proposalId != null) {
-        linkedProposal = executeJsonObject(path = "/projects/$normalizedProjectId/checkpoint-proposals/${normalizeId(proposalId)}")
-            .toCheckpointProposalReview()
-      }
       investigation = SavedInvestigationReview(
           sessionId = sessionId,
           projectId = latestSession.getString("project_id"),
@@ -141,11 +145,12 @@ internal class HttpUrlProjectApi(
           trustDecision = trust.optNullableString("user_decision"),
           proposalId = proposalId,
           proposalStatus = trust.optNullableString("checkpoint_proposal_status"),
+          followUpSessionId = trust.optNullableString("follow_up_investigation_session_id"),
           retainedImage = imageBytes,
       )
       }
     } catch (exc: ProjectApiException) {
-      investigationLoadError = exc.message
+      investigationLoadError = listOfNotNull(investigationLoadError, exc.message).joinToString("; ")
     }
 
     return ProjectOverview(
@@ -153,7 +158,7 @@ internal class HttpUrlProjectApi(
         checkpoint = checkpoint,
         recentActivity = recentActivity,
         latestInvestigation = investigation,
-        pendingProposal = linkedProposal?.takeIf { it.status == "pending" },
+        pendingProposals = pendingProposals,
         investigationLoadError = investigationLoadError,
     )
   }

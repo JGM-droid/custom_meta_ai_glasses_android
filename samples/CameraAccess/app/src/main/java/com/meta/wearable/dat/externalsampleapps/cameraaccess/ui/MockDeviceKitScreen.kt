@@ -78,16 +78,18 @@ fun MockDeviceKitScreen(
     // screen is reached from within a Workspace-sourced Capture session (before streaming
     // starts) - see CameraAccessScaffold.kt. Null for the existing global entry point.
     sourceProjectId: String? = null,
+    continuationSessionId: String? = null,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val investigationViewModel: InvestigationSessionDebugViewModel =
     viewModel(
       // Same stale-ViewModel precedent as StreamScreen.kt - see its comment.
-      key = sourceProjectId ?: "unscoped",
+      key = "${sourceProjectId ?: "unscoped"}:${continuationSessionId.orEmpty()}",
       factory =
         InvestigationSessionDebugViewModel.factory(
           application = (LocalActivity.current as ComponentActivity).application,
           sourceProjectId = sourceProjectId,
+          initialContinuationSessionId = continuationSessionId,
         ),
     )
 

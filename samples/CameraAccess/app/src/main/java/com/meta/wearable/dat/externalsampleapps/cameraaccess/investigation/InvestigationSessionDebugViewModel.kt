@@ -3,8 +3,11 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation
 import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.CreationExtras
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.BuildConfig
 import java.io.InputStream
 import kotlinx.coroutines.Dispatchers
@@ -117,19 +120,34 @@ internal class InvestigationSessionDebugViewModel(
     // so a single Capture session can never silently change which Project it belongs to partway
     // through.
     private val sourceProjectId: String? = null,
+    private val initialContinuationSessionId: String? = null,
     private val repository: InvestigationSessionRepository = InvestigationSessionRepository(
         api = HttpUrlInvestigationSessionApi(InvestigationBackendConfig.resolveBaseUrl()),
     ),
+    private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
 ) : AndroidViewModel(application) {
   companion object {
     private const val SUBMISSION_TIMEOUT_MS = 120_000L
 
-    fun factory(application: Application, sourceProjectId: String? = null): ViewModelProvider.Factory {
+    fun factory(application: Application, sourceProjectId: String? = null, initialContinuationSessionId: String? = null): ViewModelProvider.Factory {
       return object : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
           if (modelClass.isAssignableFrom(InvestigationSessionDebugViewModel::class.java)) {
-            return InvestigationSessionDebugViewModel(application, sourceProjectId) as T
+            return InvestigationSessionDebugViewModel(application, sourceProjectId, initialContinuationSessionId) as T
+          }
+          throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
+          if (modelClass.isAssignableFrom(InvestigationSessionDebugViewModel::class.java)) {
+            return InvestigationSessionDebugViewModel(
+                application,
+                sourceProjectId,
+                initialContinuationSessionId,
+                savedStateHandle = extras.createSavedStateHandle(),
+            ) as T
           }
           throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
         }
@@ -144,8 +162,29 @@ internal class InvestigationSessionDebugViewModel(
 
   init {
     _uiState.update { state ->
+      val restoredSessionId = initialContinuationSessionId ?: savedStateHandle["investigation_session_id"]
+      val restoredContinuationSessionId = resolveContinuationSessionId(
+          initialContinuationSessionId = initialContinuationSessionId,
+          savedContinuationSessionId = savedStateHandle["investigation_continuation_session_id"],
+          savedSessionId = savedStateHandle["investigation_session_id"],
+      )
+      val restoredImages = state.images.map { slot ->
+        slot.copy(
+            uriString = savedStateHandle["investigation_image_uri_${slot.slotIndex}"],
+            displayName = savedStateHandle["investigation_image_name_${slot.slotIndex}"],
+        )
+      }
       state.copy(
           backendBaseUrl = InvestigationBackendConfig.resolveBaseUrl(BuildConfig.INVESTIGATION_BACKEND_BASE_URL),
+          explanationText = savedStateHandle["investigation_explanation"] ?: state.explanationText,
+          sessionId = restoredSessionId,
+          // A known canonical session must always flow through repository reconciliation after
+          // recreation, even when the previous client state itself was not persisted.
+          continuationSessionId = restoredContinuationSessionId,
+          backendStatus = restoredSessionId?.let { BackendSessionStatus.CREATED },
+          images = restoredImages,
+          activeCaptureCount = selectedSlotCount(restoredImages),
+          hasCaptureCapacity = InvestigationCaptureSlots.hasCapacity(restoredImages),
       )
     }
   }
@@ -159,6 +198,7 @@ internal class InvestigationSessionDebugViewModel(
   }
 
   fun setExplanationText(text: String) {
+    savedStateHandle["investigation_explanation"] = text
     _uiState.update { it.copy(explanationText = text) }
   }
 
@@ -194,6 +234,8 @@ internal class InvestigationSessionDebugViewModel(
             if (decision == BackendTrustDecision.MORE_EVIDENCE) {
               val followUpId = response.followUpSessionId
                   ?: throw IllegalStateException("Backend did not return a follow-up Investigation.")
+              savedStateHandle["investigation_session_id"] = followUpId
+              savedStateHandle["investigation_continuation_session_id"] = followUpId
               _uiState.update {
                 InvestigationSessionDebugUiState(
                     backendBaseUrl = it.backendBaseUrl,
@@ -246,6 +288,8 @@ internal class InvestigationSessionDebugViewModel(
   }
 
   fun setImage(slotIndex: Int, uriString: String?, displayName: String?) {
+    savedStateHandle["investigation_image_uri_$slotIndex"] = uriString
+    savedStateHandle["investigation_image_name_$slotIndex"] = displayName
     _uiState.update { state ->
       val updatedImages =
           state.images.map { slot ->
@@ -454,6 +498,7 @@ internal class InvestigationSessionDebugViewModel(
                             statusMessage = progress.message ?: state.statusMessage,
                         )
                       }
+                      progress.sessionId?.let { savedStateHandle["investigation_session_id"] = it }
                     },
                 )
               }
@@ -481,6 +526,7 @@ internal class InvestigationSessionDebugViewModel(
                   trustMessage = null,
               )
             }
+            savedStateHandle["investigation_session_id"] = outcome.polling.sessionId
           }
 
           is InvestigationSubmissionOutcome.Cancelled -> {
@@ -583,7 +629,8 @@ internal class InvestigationSessionDebugViewModel(
             "backend_base_url" to _uiState.value.backendBaseUrl,
         ),
         projectId = sourceProjectId,
-        continuationSessionId = _uiState.value.continuationSessionId,
+        continuationSessionId = _uiState.value.continuationSessionId
+            ?: _uiState.value.sessionId.takeIf { _uiState.value.clientState == InvestigationClientState.FAILED },
     )
   }
 
@@ -628,3 +675,9 @@ internal class InvestigationSessionDebugViewModel(
   }
 
 }
+
+internal fun resolveContinuationSessionId(
+    initialContinuationSessionId: String?,
+    savedContinuationSessionId: String?,
+    savedSessionId: String?,
+): String? = initialContinuationSessionId ?: savedContinuationSessionId ?: savedSessionId

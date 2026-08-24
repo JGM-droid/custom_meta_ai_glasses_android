@@ -49,7 +49,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,8 +73,32 @@ private sealed interface TopLevelScreen {
 
   // sourceProject: the explicit Project Capture was entered from (Workspace), or null for the
   // existing global entry point (Projects Home) - see file header.
-  data class Capture(val sourceProject: ProjectSummary? = null) : TopLevelScreen
+  data class Capture(val sourceProject: ProjectSummary? = null, val continuationSessionId: String? = null) : TopLevelScreen
 }
+
+private val TopLevelScreenSaver = listSaver<TopLevelScreen, String>(
+    save = { screen ->
+      when (screen) {
+        TopLevelScreen.ProjectsHome -> listOf("home", "", "", "")
+        TopLevelScreen.NewProject -> listOf("new", "", "", "")
+        is TopLevelScreen.ProjectDetail -> listOf("detail", screen.project.projectId, screen.project.name, screen.project.status)
+        is TopLevelScreen.ProjectWorkspace -> listOf("workspace", screen.project.projectId, screen.project.name, screen.project.status)
+        is TopLevelScreen.Capture -> listOf("capture", screen.sourceProject?.projectId.orEmpty(), screen.sourceProject?.name.orEmpty(), screen.sourceProject?.status.orEmpty(), screen.continuationSessionId.orEmpty())
+      }
+    },
+    restore = { saved ->
+      val project = saved.getOrNull(1)?.takeIf(String::isNotBlank)?.let {
+        ProjectSummary(it, saved.getOrElse(2) { "" }, saved.getOrElse(3) { "active" })
+      }
+      when (saved.firstOrNull()) {
+        "new" -> TopLevelScreen.NewProject
+        "detail" -> project?.let(TopLevelScreen::ProjectDetail) ?: TopLevelScreen.ProjectsHome
+        "workspace" -> project?.let(TopLevelScreen::ProjectWorkspace) ?: TopLevelScreen.ProjectsHome
+        "capture" -> TopLevelScreen.Capture(project, saved.getOrNull(4)?.takeIf(String::isNotBlank))
+        else -> TopLevelScreen.ProjectsHome
+      }
+    },
+)
 
 @Composable
 fun AppRoot(
@@ -81,7 +106,9 @@ fun AppRoot(
     onRequestWearablesPermission: suspend (Permission) -> PermissionStatus,
     modifier: Modifier = Modifier,
 ) {
-  var topLevelScreen by remember { mutableStateOf<TopLevelScreen>(TopLevelScreen.ProjectsHome) }
+  var topLevelScreen by rememberSaveable(stateSaver = TopLevelScreenSaver) {
+    mutableStateOf<TopLevelScreen>(TopLevelScreen.ProjectsHome)
+  }
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
   // Same "don't strand an active stream" rule as the visible back controls below, applied to the
@@ -130,6 +157,9 @@ fun AppRoot(
             onStartWorking = {
               project -> topLevelScreen = TopLevelScreen.Capture(sourceProject = project)
             },
+            onResumeInvestigation = { project, sessionId ->
+              topLevelScreen = TopLevelScreen.Capture(project, sessionId)
+            },
             onContinueProject = { project -> topLevelScreen = TopLevelScreen.ProjectWorkspace(project) },
             modifier = modifier,
         )
@@ -165,6 +195,7 @@ fun AppRoot(
               onRequestWearablesPermission = onRequestWearablesPermission,
               sourceProjectId = screen.sourceProject?.projectId,
               sourceProjectName = screen.sourceProject?.name,
+              continuationSessionId = screen.continuationSessionId,
               onReturnToSourceProject =
                   screen.sourceProject?.let { project ->
                     { topLevelScreen = TopLevelScreen.ProjectDetail(project) }

@@ -8,6 +8,26 @@ import org.junit.Test
 
 class InvestigationProductStateTest {
   @Test
+  fun restoredKnownSessionIsPromotedToRepositoryReconciliation() {
+    assertEquals(
+        "known-session",
+        resolveContinuationSessionId(
+            initialContinuationSessionId = null,
+            savedContinuationSessionId = null,
+            savedSessionId = "known-session",
+        ),
+    )
+    assertEquals(
+        "follow-up-session",
+        resolveContinuationSessionId(
+            initialContinuationSessionId = null,
+            savedContinuationSessionId = "follow-up-session",
+            savedSessionId = "original-session",
+        ),
+    )
+  }
+
+  @Test
   fun zeroEvidenceStartsReady() {
     val state = deriveInvestigationProductState(InvestigationSessionDebugUiState())
 

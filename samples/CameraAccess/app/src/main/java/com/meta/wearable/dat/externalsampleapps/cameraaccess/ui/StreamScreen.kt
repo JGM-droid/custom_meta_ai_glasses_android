@@ -68,6 +68,7 @@ internal fun StreamScreen(
     // see CameraAccessScaffold.kt. Null for the existing global Capture entry point.
     sourceProjectId: String? = null,
     sourceProjectName: String? = null,
+    continuationSessionId: String? = null,
     onReturnToSourceProject: (() -> Unit)? = null,
     streamViewModel: StreamViewModel =
         viewModel(
@@ -85,11 +86,12 @@ internal fun StreamScreen(
             // sourceProjectId. Without this, Compose's default class-name-only key would let one
             // Capture session's Project attribution leak into the next (the same class of bug
             // already found and fixed for NewProjectViewModel in an earlier slice).
-            key = sourceProjectId ?: "unscoped",
+            key = "${sourceProjectId ?: "unscoped"}:${continuationSessionId.orEmpty()}",
             factory =
                 InvestigationSessionDebugViewModel.factory(
                     application = (LocalActivity.current as ComponentActivity).application,
                     sourceProjectId = sourceProjectId,
+                    initialContinuationSessionId = continuationSessionId,
                 ),
         ),
 ) {

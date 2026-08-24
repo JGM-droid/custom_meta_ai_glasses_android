@@ -57,6 +57,7 @@ data class SavedInvestigationReview(
     val trustDecision: String?,
     val proposalId: String?,
     val proposalStatus: String?,
+    val followUpSessionId: String?,
     val retainedImage: ByteArray?,
 )
 
@@ -74,7 +75,7 @@ data class ProjectOverview(
     val checkpoint: ProjectCheckpoint,
     val recentActivity: List<ProjectActivityEntry>,
     val latestInvestigation: SavedInvestigationReview? = null,
-    val pendingProposal: CheckpointProposalReview? = null,
+    val pendingProposals: List<CheckpointProposalReview> = emptyList(),
     val investigationLoadError: String? = null,
 )
 
