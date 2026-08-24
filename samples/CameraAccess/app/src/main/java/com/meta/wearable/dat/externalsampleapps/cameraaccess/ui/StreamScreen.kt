@@ -35,6 +35,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -46,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -168,6 +170,30 @@ internal fun StreamScreen(
             text = "Working on $projectName",
             modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding(),
         )
+      }
+      // Visible, discoverable exit from this screen. The Android system Back button/gesture is
+      // deliberately disabled for the whole time a stream is active (see AppRoot's
+      // canGoBack/BackHandler) so a stream is never torn down implicitly - but that leaves
+      // "Stop streaming" below (which only detaches the camera and drops into device selection,
+      // not back to the Project) as the sole visible control, with no direct way back to the
+      // Project that opened this screen. "Done" reuses the exact same stopStream() teardown
+      // "Stop streaming" and the Investigation panel's own return-to-Project action already use -
+      // no second teardown mechanism - then goes to onReturnToSourceProject when this session was
+      // opened from a Project, or falls back to the existing unscoped device-selection behavior
+      // otherwise, matching AppRoot's own Back semantics for the unscoped Capture entry point.
+      TextButton(
+          onClick = {
+            streamViewModel.stopStream()
+            val returnToProject = onReturnToSourceProject
+            if (returnToProject != null) {
+              returnToProject()
+            } else {
+              wearablesViewModel.navigateToDeviceSelection()
+            }
+          },
+          modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().testTag("stream_done_button"),
+      ) {
+        Text(if (sourceProjectName != null) "Done" else "Back")
       }
       Column(
           modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding(),

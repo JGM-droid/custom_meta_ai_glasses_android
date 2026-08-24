@@ -41,14 +41,19 @@
 // of those types has anything Investigation-specific in it (confirmed by inspection before
 // reusing them): the reducer is a plain event->state function, and the controller is a generic
 // on-device-SpeechRecognizer wrapper. Only the destination differs: Investigation pipes its
-// transcript into an explanation field; Workspace pipes it into the SAME composer real typed text
-// already uses (see onSpeechEvent below), with the exact append-don't-destroy behavior Phase 5 of
-// the Voice-to-Text slice requires. Voice is purely an input method: a transcript only ever
-// updates local draft state (draftText) - it never calls askProject() itself and never touches
-// the backend. speechControllerFactory is the test seam this slice adds: production code defaults
-// it to the real createInvestigationSpeechRecognizerController factory, and instrumented tests
-// inject a fake InvestigationSpeechRecognizerController instead of driving the real on-device
-// recognizer (which cannot be reliably scripted in an automated test).
+// transcript into an explanation field; Workspace pipes it into local draft state (see
+// onSpeechEvent below), with the exact append-don't-destroy behavior Phase 5 of the Voice-to-Text
+// slice requires. A single shared speechController/speechUiState now serves BOTH the Ask composer
+// AND all five RecordProgressPanel fields - never two duplicate speech subsystems - with
+// voiceTarget (see ProjectWorkspaceScreen below) recording which one text field the next
+// transcript belongs to, so one recognizer session can safely serve six possible destinations
+// without ever mixing them up. Voice is purely an input method: a transcript only ever updates
+// local draft state (draftText or one progress field) - it never calls askProject(),
+// previewProgress(), or saveProgress() itself and never touches the backend.
+// speechControllerFactory is the test seam this slice adds: production code defaults it to the
+// real createInvestigationSpeechRecognizerController factory, and instrumented tests inject a
+// fake InvestigationSpeechRecognizerController instead of driving the real on-device recognizer
+// (which cannot be reliably scripted in an automated test).
 //
 // Ask Project (Project-Aware Ask): the composer is now a real interaction, not just draft text.
 // "Ask Project" sends the typed question to the backend's existing, read-only
@@ -214,13 +219,37 @@ internal fun ProjectWorkspaceScreen(
     onDispose { speechController?.destroy() }
   }
 
-  // Voice is an input method only: a transcript ever does exactly one thing - update draftText.
-  // It never calls askProject() and never touches the backend (Phase 6/7 of the Voice-to-Text
-  // slice). Append rather than overwrite when the composer already has text (Phase 5).
+  // Which draft the next transcript should land in - the composer's Ask question, or one of
+  // RecordProgressPanel's five fields. Set synchronously the moment a mic button is tapped
+  // (before the permission request even resolves), so a transcript that arrives later can never
+  // land in the wrong field: only one speech session can ever be in flight at a time (the
+  // recognizer itself, and every mic button below, both enforce that), so this single value is
+  // always the correct destination for whatever transcript arrives next. Scoped per-project like
+  // draftText/speechController, so it can never carry a target across a Project switch.
+  var voiceTarget by remember(project.projectId) { mutableStateOf(VoiceTarget.ASK_COMPOSER) }
+
+  // Voice is an input method only: a transcript ever does exactly one thing - update the local
+  // draft state for whichever field requested it (voiceTarget). It never calls askProject() or
+  // saveProgress()/previewProgress() and never touches the backend (Phase 6/7 of the Voice-to-Text
+  // slice, extended to Record Progress). Append rather than overwrite when that field already has
+  // text (Phase 5), for every target - not just the composer.
   val onSpeechEvent: (InvestigationSpeechEvent) -> Unit = { event ->
     val transition = reduceInvestigationSpeechState(speechUiState, event)
     speechUiState = transition.state
-    transition.transcript?.let { transcript -> draftText = appendTranscriptToDraft(draftText, transcript) }
+    transition.transcript?.let { transcript ->
+      when (voiceTarget) {
+        VoiceTarget.ASK_COMPOSER -> draftText = appendTranscriptToDraft(draftText, transcript)
+        VoiceTarget.PROGRESS_SUMMARY -> progressSummary = appendTranscriptToDraft(progressSummary, transcript)
+        VoiceTarget.PROGRESS_DETAILS -> progressDetails = appendTranscriptToDraft(progressDetails, transcript)
+        VoiceTarget.PROGRESS_CURRENT_WORK -> progressCurrentWork = appendTranscriptToDraft(progressCurrentWork, transcript)
+        VoiceTarget.PROGRESS_BLOCKERS -> progressBlockers = appendTranscriptToDraft(progressBlockers, transcript)
+        VoiceTarget.PROGRESS_NEXT_ACTION -> progressNextAction = appendTranscriptToDraft(progressNextAction, transcript)
+      }
+      // Matches every onXChange handler below: a fresh edit invalidates a stale preview exactly
+      // the same way typed text does, so a spoken correction can never be silently left out of
+      // what gets saved.
+      if (voiceTarget != VoiceTarget.ASK_COMPOSER) viewModel.editProgressDraft()
+    }
   }
 
   val startSpeechCapture: () -> Unit = {
@@ -239,6 +268,14 @@ internal fun ProjectWorkspaceScreen(
           onSpeechEvent(InvestigationSpeechEvent.PermissionDenied)
         }
       }
+
+  // Shared entry point for every mic button in this Workspace (composer and all five Record
+  // Progress fields): record which field is asking before requesting permission/starting the
+  // recognizer, so onSpeechEvent above always has the right destination.
+  val requestVoiceCapture: (VoiceTarget) -> Unit = { target ->
+    voiceTarget = target
+    microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+  }
 
   Column(
       modifier =
@@ -311,7 +348,8 @@ internal fun ProjectWorkspaceScreen(
             askState = askState,
             onAskProject = { viewModel.askProject(draftText) },
             speechUiState = speechUiState,
-            onMicClick = { microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+            voiceTarget = voiceTarget,
+            onMicClick = { requestVoiceCapture(VoiceTarget.ASK_COMPOSER) },
             onCancelListening = {
               speechController?.cancel()
               onSpeechEvent(InvestigationSpeechEvent.Cancelled)
@@ -377,6 +415,13 @@ internal fun ProjectWorkspaceScreen(
                 )
               },
               onSave = viewModel::saveProgress,
+              speechUiState = speechUiState,
+              voiceTarget = voiceTarget,
+              onFieldMicClick = requestVoiceCapture,
+              onCancelListening = {
+                speechController?.cancel()
+                onSpeechEvent(InvestigationSpeechEvent.Cancelled)
+              },
           )
         }
 
@@ -408,6 +453,21 @@ internal fun ProjectWorkspaceScreen(
 internal fun appendTranscriptToDraft(currentDraft: String, transcript: String): String =
     if (currentDraft.isBlank()) transcript else "$currentDraft\n$transcript"
 
+/**
+ * Every field in this Workspace a voice transcript can land in: the Ask composer, and each of
+ * RecordProgressPanel's five fields. Exactly one is ever "active" (see voiceTarget in
+ * ProjectWorkspaceScreen above) - this is what lets one shared speech session safely serve
+ * multiple text fields without ever mixing them up.
+ */
+internal enum class VoiceTarget {
+  ASK_COMPOSER,
+  PROGRESS_SUMMARY,
+  PROGRESS_DETAILS,
+  PROGRESS_CURRENT_WORK,
+  PROGRESS_BLOCKERS,
+  PROGRESS_NEXT_ACTION,
+}
+
 @Composable
 private fun WorkspaceComposer(
     text: String,
@@ -415,6 +475,7 @@ private fun WorkspaceComposer(
     askState: ProjectAskState,
     onAskProject: () -> Unit,
     speechUiState: InvestigationSpeechUiState,
+    voiceTarget: VoiceTarget,
     onMicClick: () -> Unit,
     onCancelListening: () -> Unit,
     modifier: Modifier = Modifier,
@@ -422,10 +483,18 @@ private fun WorkspaceComposer(
   val isSubmitting = askState is ProjectAskState.Submitting
   // Whitespace-only input can never submit - trimmed the same way the ViewModel itself checks.
   val canSubmit = text.isNotBlank() && !isSubmitting
-  val isListening = speechUiState.phase == InvestigationSpeechUiPhase.LISTENING
-  // Can't start a new voice session while one is already listening or a question is in flight -
-  // and can't submit Ask while voice is listening, since the transcript hasn't landed yet.
-  val micEnabled = !isListening && !isSubmitting
+  // speechUiState is shared with RecordProgressPanel's five fields (see voiceTarget in
+  // ProjectWorkspaceScreen). Only show this composer as "listening"/with its own feedback and
+  // Cancel when it is actually the active target - otherwise a voice session started from a
+  // Record Progress field would misleadingly make the composer's mic look active too.
+  val isThisComposerListening =
+      voiceTarget == VoiceTarget.ASK_COMPOSER && speechUiState.phase == InvestigationSpeechUiPhase.LISTENING
+  val anyVoiceSessionActive = speechUiState.phase == InvestigationSpeechUiPhase.LISTENING
+  // Can't start a new voice session while ANY field's session is already listening (this
+  // composer's or a Record Progress field's - the on-device recognizer only serves one at a
+  // time) or while a question is in flight - and can't submit Ask while voice is listening, since
+  // the transcript hasn't landed yet.
+  val micEnabled = !anyVoiceSessionActive && !isSubmitting
 
   Column(modifier = modifier.padding(top = 28.dp)) {
     Text(
@@ -476,29 +545,31 @@ private fun WorkspaceComposer(
       ) {
         Icon(
             Icons.Filled.Mic,
-            contentDescription = if (isListening) "Listening" else "Voice input",
-            tint = if (isListening) AppColor.Accent else AppColor.InkSecondary,
+            contentDescription = if (isThisComposerListening) "Listening" else "Voice input",
+            tint = if (isThisComposerListening) AppColor.Accent else AppColor.InkSecondary,
         )
       }
       Text(
-          text = speechUiState.speakButtonLabel,
-          color = if (isListening) AppColor.Accent else AppColor.InkSecondary,
+          text = if (isThisComposerListening) speechUiState.speakButtonLabel else InvestigationSpeechUiState().speakButtonLabel,
+          color = if (isThisComposerListening) AppColor.Accent else AppColor.InkSecondary,
           fontSize = 12.sp,
       )
-      if (speechUiState.canCancel) {
+      if (voiceTarget == VoiceTarget.ASK_COMPOSER && speechUiState.canCancel) {
         TextButton(onClick = onCancelListening, modifier = Modifier.testTag("workspace_mic_cancel")) {
           Text("Cancel", color = AppColor.Accent, fontSize = 12.sp)
         }
       }
     }
 
-    speechUiState.feedbackMessage?.let { message ->
-      Text(
-          text = message,
-          color = if (speechUiState.phase == InvestigationSpeechUiPhase.ERROR) Color(0xFFFF9B9B) else AppColor.InkSecondary,
-          fontSize = 12.sp,
-          modifier = Modifier.padding(top = 4.dp).testTag("workspace_mic_status"),
-      )
+    if (voiceTarget == VoiceTarget.ASK_COMPOSER) {
+      speechUiState.feedbackMessage?.let { message ->
+        Text(
+            text = message,
+            color = if (speechUiState.phase == InvestigationSpeechUiPhase.ERROR) Color(0xFFFF9B9B) else AppColor.InkSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 4.dp).testTag("workspace_mic_status"),
+        )
+      }
     }
 
     Button(
@@ -678,6 +749,10 @@ private fun RecordProgressPanel(
     onNextActionChange: (String) -> Unit,
     onPreview: () -> Unit,
     onSave: () -> Unit,
+    speechUiState: InvestigationSpeechUiState,
+    voiceTarget: VoiceTarget,
+    onFieldMicClick: (VoiceTarget) -> Unit,
+    onCancelListening: () -> Unit,
 ) {
   val locked = state is ProjectProgressState.Previewing || state is ProjectProgressState.Saving
   Column(modifier = Modifier.fillMaxWidth().padding(top = 24.dp).testTag("record_progress_panel")) {
@@ -688,11 +763,26 @@ private fun RecordProgressPanel(
         fontSize = 12.sp,
         modifier = Modifier.padding(top = 6.dp),
     )
-    ProgressField("What happened?", summary, onSummaryChange, locked, "record_progress_summary")
-    ProgressField("Details (optional)", details, onDetailsChange, locked, "record_progress_details")
-    ProgressField("Update current work (optional)", currentWork, onCurrentWorkChange, locked, "record_progress_current_work")
-    ProgressField("Update blockers (optional)", blockers, onBlockersChange, locked, "record_progress_blockers")
-    ProgressField("Update next action (optional)", nextAction, onNextActionChange, locked, "record_progress_next_action")
+    ProgressField(
+        "What happened?", summary, onSummaryChange, locked, "record_progress_summary",
+        VoiceTarget.PROGRESS_SUMMARY, voiceTarget, speechUiState, onFieldMicClick, onCancelListening,
+    )
+    ProgressField(
+        "Details (optional)", details, onDetailsChange, locked, "record_progress_details",
+        VoiceTarget.PROGRESS_DETAILS, voiceTarget, speechUiState, onFieldMicClick, onCancelListening,
+    )
+    ProgressField(
+        "Update current work (optional)", currentWork, onCurrentWorkChange, locked, "record_progress_current_work",
+        VoiceTarget.PROGRESS_CURRENT_WORK, voiceTarget, speechUiState, onFieldMicClick, onCancelListening,
+    )
+    ProgressField(
+        "Update blockers (optional)", blockers, onBlockersChange, locked, "record_progress_blockers",
+        VoiceTarget.PROGRESS_BLOCKERS, voiceTarget, speechUiState, onFieldMicClick, onCancelListening,
+    )
+    ProgressField(
+        "Update next action (optional)", nextAction, onNextActionChange, locked, "record_progress_next_action",
+        VoiceTarget.PROGRESS_NEXT_ACTION, voiceTarget, speechUiState, onFieldMicClick, onCancelListening,
+    )
 
     when (state) {
       ProjectProgressState.Idle -> Unit
@@ -753,14 +843,63 @@ private fun RecordProgressPanel(
 }
 
 @Composable
-private fun ProgressField(label: String, value: String, onValueChange: (String) -> Unit, locked: Boolean, tag: String) {
-  OutlinedTextField(
-      value = value,
-      onValueChange = onValueChange,
-      enabled = !locked,
-      label = { Text(label) },
-      modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag(tag),
-  )
+private fun ProgressField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    locked: Boolean,
+    tag: String,
+    target: VoiceTarget,
+    activeVoiceTarget: VoiceTarget,
+    speechUiState: InvestigationSpeechUiState,
+    onMicClick: (VoiceTarget) -> Unit,
+    onCancelListening: () -> Unit,
+) {
+  // This field's own mic is only "listening" when it is the one currently active - every other
+  // field's mic stays idle-styled and disabled while a session targeting a different field (or
+  // the composer) is in flight, since the recognizer can only serve one field at a time anyway.
+  val isThisFieldListening =
+      activeVoiceTarget == target && speechUiState.phase == InvestigationSpeechUiPhase.LISTENING
+  val micEnabled = !locked && speechUiState.phase != InvestigationSpeechUiPhase.LISTENING
+  Column {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        enabled = !locked,
+        label = { Text(label) },
+        trailingIcon = {
+          IconButton(
+              onClick = { onMicClick(target) },
+              enabled = micEnabled,
+              modifier = Modifier.testTag("${tag}_mic"),
+          ) {
+            Icon(
+                Icons.Filled.Mic,
+                contentDescription = if (isThisFieldListening) "Listening" else "Voice input for $label",
+                tint = if (isThisFieldListening) AppColor.Accent else AppColor.InkSecondary,
+            )
+          }
+        },
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag(tag),
+    )
+    if (activeVoiceTarget == target) {
+      speechUiState.feedbackMessage?.let { message ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Text(
+              text = message,
+              color = if (speechUiState.phase == InvestigationSpeechUiPhase.ERROR) Color(0xFFFF9B9B) else AppColor.InkSecondary,
+              fontSize = 12.sp,
+              modifier = Modifier.padding(top = 2.dp).testTag("${tag}_mic_status"),
+          )
+          if (speechUiState.canCancel) {
+            TextButton(onClick = onCancelListening, modifier = Modifier.testTag("${tag}_mic_cancel")) {
+              Text("Cancel", color = AppColor.Accent, fontSize = 12.sp)
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 @Composable

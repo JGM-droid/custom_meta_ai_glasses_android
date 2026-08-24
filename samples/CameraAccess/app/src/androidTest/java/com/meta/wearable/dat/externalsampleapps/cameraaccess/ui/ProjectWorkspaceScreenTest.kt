@@ -15,11 +15,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -259,6 +262,138 @@ class ProjectWorkspaceScreenTest {
     composeTestRule.onNodeWithText("Ask your Project anything...").assertExists()
     composeTestRule.onNodeWithText("Check voltage at contactor.", substring = true).assertDoesNotExist()
     assertEquals(1, fakeControllerA.destroyCallCount)
+  }
+
+  // --- Record Progress voice entry (extends the composer-only coverage above to the five
+  // RecordProgressPanel fields, using the same FakeSpeechRecognizerController seam and the same
+  // "prove it, don't assume it" bar: intended-field-only delivery, cancel/failure never erasing
+  // typed text, and per-Project isolation.) ---
+
+  @Test
+  fun tappingASpecificProgressFieldMicEntersTextOnlyIntoThatFieldAndNowhereElse() {
+    val fakeController = FakeSpeechRecognizerController()
+    setWorkspaceContent(projectA, fakeController)
+    openRecordProgress()
+
+    composeTestRule.onNodeWithTag("record_progress_blockers_mic").performClick()
+    composeTestRule.runOnUiThread {
+      fakeController.completeWith(InvestigationSpeechEvent.FinalTranscript("Waiting on a replacement part."))
+    }
+
+    composeTestRule
+        .onNodeWithTag("record_progress_blockers")
+        .assertTextContains("Waiting on a replacement part.", substring = true)
+    // The transcript must appear exactly once across the whole screen - proving it landed only in
+    // Blockers and was not also written into Summary, Details, Current Work, Next Action, or the
+    // unrelated Ask composer.
+    composeTestRule.onAllNodesWithText("Waiting on a replacement part.", substring = true).assertCountEquals(1)
+  }
+
+  @Test
+  fun voiceIntoOneProgressFieldNeverEntersAnotherProgressField() {
+    val fakeController = FakeSpeechRecognizerController()
+    setWorkspaceContent(projectA, fakeController)
+    openRecordProgress()
+
+    composeTestRule.onNodeWithTag("record_progress_summary_mic").performClick()
+    composeTestRule.runOnUiThread {
+      fakeController.completeWith(InvestigationSpeechEvent.FinalTranscript("Replaced the capacitor."))
+    }
+
+    composeTestRule.onNodeWithTag("record_progress_summary").assertTextContains("Replaced the capacitor.", substring = true)
+    composeTestRule.onAllNodesWithText("Replaced the capacitor.", substring = true).assertCountEquals(1)
+  }
+
+  @Test
+  fun cancellingProgressFieldVoiceCaptureNeverErasesAlreadyTypedText() {
+    val fakeController = FakeSpeechRecognizerController()
+    setWorkspaceContent(projectA, fakeController)
+    openRecordProgress()
+
+    composeTestRule.onNodeWithTag("record_progress_summary").performTextInput("Typed before speaking.")
+    composeTestRule.onNodeWithTag("record_progress_summary_mic").performClick()
+    // This field's own status/Cancel row only renders once it is the active target and the
+    // recognizer has reached LISTENING (see ProgressField's activeVoiceTarget gating) - waiting
+    // for the Cancel button itself is a more direct signal than matching status text.
+    composeTestRule.waitUntilExactlyOneExists(hasTestTag("record_progress_summary_mic_cancel"), timeoutMillis = 15_000L)
+    composeTestRule.onNodeWithTag("record_progress_summary_mic_cancel").performClick()
+
+    composeTestRule.onNodeWithTag("record_progress_summary").assertTextContains("Typed before speaking.", substring = true)
+  }
+
+  @Test
+  fun failedProgressFieldRecognitionPreservesTypedTextAndStaysRetryable() {
+    val fakeController = FakeSpeechRecognizerController()
+    setWorkspaceContent(projectA, fakeController)
+    openRecordProgress()
+
+    composeTestRule.onNodeWithTag("record_progress_blockers").performTextInput("Do not lose this note.")
+    composeTestRule.onNodeWithTag("record_progress_blockers_mic").performClick()
+    composeTestRule.runOnUiThread { fakeController.completeWith(InvestigationSpeechEvent.NoMatch) }
+
+    composeTestRule.onNodeWithTag("record_progress_blockers").assertTextContains("Do not lose this note.", substring = true)
+    composeTestRule.onNodeWithTag("record_progress_blockers_mic").assertIsEnabled()
+  }
+
+  @Test
+  fun progressFieldVoiceCompletionNeverTriggersPreviewOrSaveAutomatically() {
+    val fakeController = FakeSpeechRecognizerController()
+    setWorkspaceContent(projectA, fakeController)
+    openRecordProgress()
+
+    composeTestRule.onNodeWithTag("record_progress_summary_mic").performClick()
+    composeTestRule.runOnUiThread {
+      fakeController.completeWith(InvestigationSpeechEvent.FinalTranscript("Replaced the capacitor."))
+    }
+
+    // Preview must still require an explicit tap - no preview/save state was entered on the
+    // user's behalf, and the Save button must still be disabled (no PreviewReady state exists).
+    composeTestRule.onNodeWithTag("record_progress_preview").assertDoesNotExist()
+    composeTestRule.onNodeWithTag("record_progress_save_button").assertIsNotEnabled()
+  }
+
+  @Test
+  fun switchingProjectsClearsProgressFieldTranscriptAndDoesNotLeakBetweenProjects() {
+    val fakeControllerA = FakeSpeechRecognizerController()
+    val fakeControllerB = FakeSpeechRecognizerController()
+    var currentProject by mutableStateOf(projectA)
+
+    composeTestRule.setContent {
+      val vm =
+          remember(currentProject.projectId) {
+            ProjectDetailViewModel(application = application, projectId = currentProject.projectId, repository = MockProjectRepository())
+          }
+      ProjectWorkspaceScreen(
+          project = currentProject,
+          onBack = {},
+          onOpenCapture = {},
+          viewModel = vm,
+          speechControllerFactory = { if (currentProject.projectId == projectA.projectId) fakeControllerA else fakeControllerB },
+      )
+    }
+
+    composeTestRule.onNodeWithTag("workspace_record_progress_button").performClick()
+    composeTestRule.onNodeWithTag("record_progress_summary_mic").performClick()
+    composeTestRule.runOnUiThread {
+      fakeControllerA.completeWith(InvestigationSpeechEvent.FinalTranscript("Project A only note."))
+    }
+    composeTestRule
+        .onNodeWithTag("record_progress_summary")
+        .assertTextContains("Project A only note.", substring = true)
+
+    currentProject = projectB
+
+    // A fresh Workspace (and fresh Record Progress panel) for B: the panel starts closed again,
+    // and even after reopening it, Project A's transcript/controller must never carry over.
+    composeTestRule.onNodeWithTag("workspace_record_progress_button").assertExists()
+    composeTestRule.onNodeWithTag("record_progress_panel").assertDoesNotExist()
+    composeTestRule.onNodeWithTag("workspace_record_progress_button").performClick()
+    composeTestRule.onAllNodesWithText("Project A only note.", substring = true).assertCountEquals(0)
+    assertEquals(1, fakeControllerA.destroyCallCount)
+  }
+
+  private fun openRecordProgress() {
+    composeTestRule.onNodeWithTag("workspace_record_progress_button").performClick()
   }
 
   private fun setWorkspaceContent(project: ProjectSummary, speechController: FakeSpeechRecognizerController) {
