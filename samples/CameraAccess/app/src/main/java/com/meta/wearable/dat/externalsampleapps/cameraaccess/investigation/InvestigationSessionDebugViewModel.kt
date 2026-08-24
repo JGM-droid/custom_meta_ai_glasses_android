@@ -34,7 +34,10 @@ internal data class InvestigationCaptureAppendResult(
 )
 
 internal object InvestigationCaptureSlots {
-  const val MAX_CAPTURE_SLOTS = 3
+  const val MAX_CAPTURE_SLOTS = 5
+
+  fun emptySlots(): List<InvestigationImageSlotUiState> =
+      List(MAX_CAPTURE_SLOTS) { InvestigationImageSlotUiState(it) }
 
   fun selectedCount(images: List<InvestigationImageSlotUiState>): Int {
     return images.count { it.evidence != null || it.uriString != null }
@@ -90,11 +93,7 @@ internal data class InvestigationSessionDebugUiState(
     val explanationPresent: Boolean = false,
     val backendErrorCategory: String? = null,
     val explanationText: String = "",
-    val images: List<InvestigationImageSlotUiState> = listOf(
-        InvestigationImageSlotUiState(0),
-        InvestigationImageSlotUiState(1),
-        InvestigationImageSlotUiState(2),
-    ),
+    val images: List<InvestigationImageSlotUiState> = InvestigationCaptureSlots.emptySlots(),
     val activeCaptureCount: Int = 0,
     val hasCaptureCapacity: Boolean = true,
     val statusMessage: String? = null,
@@ -342,7 +341,7 @@ internal class InvestigationSessionDebugViewModel(
       if (appendedResult.appendedSlotIndex == null) {
         return@update state.copy(
             hasCaptureCapacity = false,
-            statusMessage = "Maximum of 3 captures reached for this investigation.",
+            statusMessage = "Investigation full. 5 photos added.",
         )
       }
 
@@ -352,6 +351,35 @@ internal class InvestigationSessionDebugViewModel(
       state.copy(
           images = updatedImages,
           activeCaptureCount = count,
+          hasCaptureCapacity = InvestigationCaptureSlots.hasCapacity(updatedImages),
+          backendErrorCategory = null,
+          statusMessage = null,
+      )
+    }
+    return appended
+  }
+
+  fun appendPickedImage(uriString: String, displayName: String?): Boolean {
+    var appended = false
+    _uiState.update { state ->
+      val nextSlot =
+          state.images.firstOrNull { it.evidence == null && it.uriString == null }?.slotIndex
+              ?: return@update state.copy(
+                  hasCaptureCapacity = false,
+                  statusMessage = "Investigation full. 5 photos added.",
+              )
+      appended = true
+      savedStateHandle["investigation_image_uri_$nextSlot"] = uriString
+      savedStateHandle["investigation_image_name_$nextSlot"] = displayName
+      val updatedImages =
+          state.images.map { slot ->
+            if (slot.slotIndex == nextSlot) {
+              slot.copy(uriString = uriString, displayName = displayName, evidence = null)
+            } else slot
+          }
+      state.copy(
+          images = updatedImages,
+          activeCaptureCount = selectedSlotCount(updatedImages),
           hasCaptureCapacity = InvestigationCaptureSlots.hasCapacity(updatedImages),
           backendErrorCategory = null,
           statusMessage = null,
@@ -456,7 +484,7 @@ internal class InvestigationSessionDebugViewModel(
                     isRunning = false,
                     clientState = InvestigationClientState.FAILED,
                     backendErrorCategory = "validation",
-                    statusMessage = "Select 1 to 3 images before submitting.",
+                    statusMessage = "Select 1 to 5 images before submitting.",
                 )
               }
               return@launch
@@ -617,7 +645,8 @@ internal class InvestigationSessionDebugViewModel(
           )
         }
 
-    if (selectedEvidence.isEmpty() || selectedEvidence.size > 3) {
+    if (selectedEvidence.isEmpty() ||
+        selectedEvidence.size > InvestigationCaptureSlots.MAX_CAPTURE_SLOTS) {
       return null
     }
 

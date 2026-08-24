@@ -498,8 +498,8 @@ internal class InvestigationSessionRepository(
     if (draft.explanationText.trim().isEmpty()) {
       throw IllegalArgumentException("Explanation is required before starting investigation.")
     }
-    if (draft.evidence.size > 3) {
-      throw IllegalArgumentException("At most three images are allowed.")
+    if (draft.evidence.size > InvestigationCaptureSlots.MAX_CAPTURE_SLOTS) {
+      throw IllegalArgumentException("At most five images are allowed.")
     }
     if (draft.evidence.any { it.bytes.isEmpty() }) {
       throw IllegalArgumentException("Evidence payload cannot be empty.")

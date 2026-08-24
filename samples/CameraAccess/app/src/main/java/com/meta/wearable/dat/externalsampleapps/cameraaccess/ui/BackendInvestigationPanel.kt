@@ -104,7 +104,7 @@ internal fun BackendInvestigationPanel(
                   filename = liveCaptureFilename(slotIndex = 0, extension = "png"),
                   source = InvestigationEvidenceSource.LOCAL_PICKER,
               )
-          viewModel.setEvidence(0, evidence)
+          viewModel.appendLiveEvidence(evidence)
         }
       }
 
@@ -134,22 +134,11 @@ internal fun BackendInvestigationPanel(
       onPrefillApplied?.invoke()
     }
   }
-  val firstImagePicker =
+  val imagePicker =
       rememberLauncherForActivityResult(contract = GetContent()) { uri: Uri? ->
         val displayName = uri?.lastPathSegment ?: uri?.toString()?.substringAfterLast('/')
-        viewModel.setImage(0, uri?.toString(), displayName)
+        uri?.let { viewModel.appendPickedImage(it.toString(), displayName) }
       }
-  val secondImagePicker =
-      rememberLauncherForActivityResult(contract = GetContent()) { uri: Uri? ->
-        val displayName = uri?.lastPathSegment ?: uri?.toString()?.substringAfterLast('/')
-        viewModel.setImage(1, uri?.toString(), displayName)
-      }
-  val thirdImagePicker =
-      rememberLauncherForActivityResult(contract = GetContent()) { uri: Uri? ->
-        val displayName = uri?.lastPathSegment ?: uri?.toString()?.substringAfterLast('/')
-        viewModel.setImage(2, uri?.toString(), displayName)
-      }
-  val slotPickers = listOf(firstImagePicker, secondImagePicker, thirdImagePicker)
 
   Card(
       modifier = modifier.fillMaxWidth(),
@@ -199,14 +188,13 @@ internal fun BackendInvestigationPanel(
           style = MaterialTheme.typography.titleSmall,
           fontWeight = FontWeight.SemiBold,
       )
-      uiState.images.forEach { slot ->
-        val captured = slot.evidence != null || slot.uriString != null
-        Text(
-            text = "View ${slot.slotIndex + 1} - ${if (captured) "captured" else "not captured"}",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-      }
+      Text(
+          text =
+              if (productState.capturedViewCount == 1) "1 photo added"
+              else "${productState.capturedViewCount} photos added",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurface,
+      )
 
       if (onCaptureAnotherView != null) {
         Button(
@@ -227,10 +215,19 @@ internal fun BackendInvestigationPanel(
         Button(
             onClick = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
             modifier = Modifier.weight(1f),
-            enabled = !uiState.isRunning,
+            enabled = productState.hasCaptureCapacity && !uiState.isRunning,
         ) {
           Text("Capture with phone camera")
         }
+      }
+      TextButton(
+          onClick = { imagePicker.launch("image/*") },
+          enabled = productState.hasCaptureCapacity && !uiState.isRunning,
+      ) {
+        Text(
+            if (productState.capturedViewCount == 0) "Add photo from device"
+            else "Add another from device"
+        )
       }
 
       HorizontalDivider()
@@ -398,7 +395,6 @@ internal fun BackendInvestigationPanel(
           }
         }
       }
-
       uiState.trustMessage?.let { message ->
         Text(
             text = message,
@@ -448,18 +444,9 @@ internal fun BackendInvestigationPanel(
               style = MaterialTheme.typography.bodySmall,
           )
         }
-        uiState.images.forEach { slot ->
+        uiState.images.filter { it.evidence != null || it.uriString != null }.forEach { slot ->
           Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(
-                onClick = { slotPickers[slot.slotIndex].launch("image/*") },
-                modifier = Modifier.weight(1f),
-                enabled = !uiState.isRunning,
-            ) {
-              Text(
-                  text = slot.displayName?.let { "View ${slot.slotIndex + 1}: $it" }
-                      ?: "Pick image for View ${slot.slotIndex + 1}",
-              )
-            }
+            Text(slot.displayName ?: "Photo ${slot.slotIndex + 1}", modifier = Modifier.weight(1f))
             TextButton(
                 onClick = { viewModel.clearImage(slot.slotIndex) },
                 enabled = !uiState.isRunning,

@@ -19,7 +19,7 @@ internal data class InvestigationProductState(
 ) {
   val captureActionLabel: String =
       when {
-        !hasCaptureCapacity -> "Maximum 3 views captured"
+        !hasCaptureCapacity -> "Investigation full"
         capturedViewCount == 0 -> "Capture first view"
         else -> "Capture another view"
       }

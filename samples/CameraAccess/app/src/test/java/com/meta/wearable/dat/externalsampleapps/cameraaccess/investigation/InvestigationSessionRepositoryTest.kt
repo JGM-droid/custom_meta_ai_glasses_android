@@ -29,12 +29,12 @@ class InvestigationSessionRepositoryTest {
   }
 
   @Test
-  fun rejectsMoreThanThreeImagesBeforeNetworking() = runBlocking {
+  fun rejectsSixImagesBeforeNetworking() = runBlocking {
     val api = FakeInvestigationSessionApi()
     val repository = InvestigationSessionRepository(api = api)
     val draft =
         InvestigationSubmissionDraft(
-            evidence = listOf(image("1.jpg"), image("2.jpg"), image("3.jpg"), image("4.jpg")),
+            evidence = (1..6).map { image("$it.jpg") },
             explanationText = "test",
         )
 
@@ -661,6 +661,24 @@ class InvestigationSessionRepositoryTest {
     assertTrue(outcome is InvestigationSubmissionOutcome.Completed)
     assertEquals(0, api.createSessionCalls)
     assertTrue(api.callTrace.first() == "upload:follow-up.jpg")
+  }
+
+  @Test
+  fun acceptsFiveImagesAndUploadsThemInOrderBeforeOneAnalyze() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api)
+
+    val outcome =
+        repository.submitInvestigation(
+            InvestigationSubmissionDraft(
+                evidence = (1..5).map { image("$it.jpg") },
+                explanationText = "five ordered views",
+            ),
+        )
+
+    assertTrue(outcome is InvestigationSubmissionOutcome.Completed)
+    assertEquals((1..5).map { "$it.jpg" }, api.uploadedImageFilenames)
+    assertEquals(1, api.analyzeCalls)
   }
 
   @Test

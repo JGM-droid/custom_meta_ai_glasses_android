@@ -8,55 +8,31 @@ import org.junit.Test
 
 class InvestigationCaptureSlotsTest {
   @Test
-  fun firstSecondThirdCaptureAppendInOrder() {
-    val empty =
-        listOf(
-            InvestigationImageSlotUiState(slotIndex = 0),
-            InvestigationImageSlotUiState(slotIndex = 1),
-            InvestigationImageSlotUiState(slotIndex = 2),
-        )
+  fun fiveCapturesAppendInDeterministicOrder() {
+    var images = InvestigationCaptureSlots.emptySlots()
+    repeat(5) { index ->
+      val result =
+          InvestigationCaptureSlots.appendEvidence(
+              images,
+              evidence(slotIndex = 99, filename = "capture_${index + 1}.jpg"),
+          )
+      assertEquals(index, result.appendedSlotIndex)
+      images = result.images
+    }
 
-    val first =
-        InvestigationCaptureSlots.appendEvidence(
-            empty,
-            evidence(slotIndex = 99, filename = "capture_1.jpg"),
-        )
-    assertEquals(0, first.appendedSlotIndex)
-
-    val second =
-        InvestigationCaptureSlots.appendEvidence(
-            first.images,
-            evidence(slotIndex = 99, filename = "capture_2.jpg"),
-        )
-    assertEquals(1, second.appendedSlotIndex)
-
-    val third =
-        InvestigationCaptureSlots.appendEvidence(
-            second.images,
-            evidence(slotIndex = 99, filename = "capture_3.jpg"),
-        )
-    assertEquals(2, third.appendedSlotIndex)
-
-    val ordered = InvestigationCaptureSlots.orderedEvidence(third.images)
-    assertEquals(3, ordered.size)
-    assertEquals("capture_1.jpg", ordered[0].filename)
-    assertEquals("capture_2.jpg", ordered[1].filename)
-    assertEquals("capture_3.jpg", ordered[2].filename)
-    assertEquals(0, ordered[0].slotIndex)
-    assertEquals(1, ordered[1].slotIndex)
-    assertEquals(2, ordered[2].slotIndex)
+    val ordered = InvestigationCaptureSlots.orderedEvidence(images)
+    assertEquals(5, ordered.size)
+    assertEquals((1..5).map { "capture_$it.jpg" }, ordered.map { it.filename })
+    assertEquals((0..4).toList(), ordered.map { it.slotIndex })
   }
 
   @Test
-  fun fourthCaptureIsPreventedWhenFull() {
-    val slots =
-        listOf(
-            InvestigationImageSlotUiState(slotIndex = 0, evidence = evidence(0, "one.jpg")),
-            InvestigationImageSlotUiState(slotIndex = 1, evidence = evidence(1, "two.jpg")),
-            InvestigationImageSlotUiState(slotIndex = 2, evidence = evidence(2, "three.jpg")),
-        )
+  fun sixthCaptureIsPreventedWhenFull() {
+    val slots = InvestigationCaptureSlots.emptySlots().mapIndexed { index, slot ->
+      slot.copy(evidence = evidence(index, "capture_${index + 1}.jpg"))
+    }
 
-    val result = InvestigationCaptureSlots.appendEvidence(slots, evidence(99, "four.jpg"))
+    val result = InvestigationCaptureSlots.appendEvidence(slots, evidence(99, "six.jpg"))
 
     assertNull(result.appendedSlotIndex)
     assertEquals(slots, result.images)
@@ -65,12 +41,9 @@ class InvestigationCaptureSlotsTest {
 
   @Test
   fun selectedCountAndCapacityReflectPartialPopulation() {
-    val oneSelected =
-        listOf(
-            InvestigationImageSlotUiState(slotIndex = 0, evidence = evidence(0, "one.jpg")),
-            InvestigationImageSlotUiState(slotIndex = 1),
-            InvestigationImageSlotUiState(slotIndex = 2),
-        )
+    val oneSelected = InvestigationCaptureSlots.emptySlots().mapIndexed { index, slot ->
+      if (index == 0) slot.copy(evidence = evidence(0, "one.jpg")) else slot
+    }
 
     assertEquals(1, InvestigationCaptureSlots.selectedCount(oneSelected))
     assertTrue(InvestigationCaptureSlots.hasCapacity(oneSelected))
@@ -78,12 +51,9 @@ class InvestigationCaptureSlotsTest {
 
   @Test
   fun localPickerUriIsCountedAsOccupiedSlot() {
-    val withUri =
-        listOf(
-            InvestigationImageSlotUiState(slotIndex = 0, uriString = "content://picker/one", displayName = "one.jpg"),
-            InvestigationImageSlotUiState(slotIndex = 1),
-            InvestigationImageSlotUiState(slotIndex = 2),
-        )
+    val withUri = InvestigationCaptureSlots.emptySlots().mapIndexed { index, slot ->
+      if (index == 0) slot.copy(uriString = "content://picker/one", displayName = "one.jpg") else slot
+    }
 
     assertEquals(1, InvestigationCaptureSlots.selectedCount(withUri))
     assertTrue(InvestigationCaptureSlots.hasCapacity(withUri))
