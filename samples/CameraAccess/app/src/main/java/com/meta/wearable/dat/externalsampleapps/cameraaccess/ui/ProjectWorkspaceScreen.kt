@@ -494,7 +494,7 @@ private fun WorkspaceActions(onOpenCapture: () -> Unit, modifier: Modifier = Mod
         shape = RoundedCornerShape(16.dp),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = AppColor.Accent),
     ) {
-      Text("Capture / Test Glasses", fontWeight = FontWeight.SemiBold)
+      Text("Use glasses for this Project", fontWeight = FontWeight.SemiBold)
     }
   }
 }
@@ -540,8 +540,6 @@ private fun SecondarySections(onOpenProjectDetails: () -> Unit, modifier: Modifi
     // - see file header) - clearly non-functional placeholder rows rather than fabricated counts
     // or fake navigation. Project Details is real: it opens this same Project's already-built
     // Detail screen (the same destination "‹ Overview" above uses).
-    SecondarySectionRow(label = "Photos & Evidence", subtitle = "Coming soon")
-    SecondarySectionRow(label = "Investigation History", subtitle = "Coming soon")
     SecondarySectionRow(label = "Project Details", subtitle = "View full project state", onClick = onOpenProjectDetails)
   }
 }

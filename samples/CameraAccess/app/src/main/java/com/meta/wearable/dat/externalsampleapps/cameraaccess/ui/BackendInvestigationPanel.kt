@@ -321,12 +321,12 @@ internal fun BackendInvestigationPanel(
         if (productState.phase == InvestigationProductPhase.COMPLETED && compactResult != null) {
         HorizontalDivider()
         Text(
-            text = "DIAGNOSIS",
+            text = "AI SUGGESTION — UNCONFIRMED",
             style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
-            text = "AI inference — unconfirmed working hypothesis",
+            text = "This is an AI suggestion, not confirmed Project truth.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -352,7 +352,7 @@ internal fun BackendInvestigationPanel(
               fontWeight = FontWeight.SemiBold,
           )
           Text(
-              text = "Continue means reasonable enough to work from. It does not confirm the AI result.",
+              text = "Keeping this as a working hypothesis records your assessment. It does not update the Project. Any suggested Project change still requires Apply to Project.",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
@@ -361,20 +361,20 @@ internal fun BackendInvestigationPanel(
               modifier = Modifier.fillMaxWidth(),
               enabled = !uiState.trustDecisionInFlight,
           ) {
-            Text("Continue with working hypothesis")
+            Text("Keep as working hypothesis")
           }
           Button(
               onClick = { viewModel.submitTrustDecision(BackendTrustDecision.MORE_EVIDENCE) },
               modifier = Modifier.fillMaxWidth(),
               enabled = !uiState.trustDecisionInFlight,
           ) {
-            Text("Gather more evidence")
+            Text("Add more evidence")
           }
           TextButton(
               onClick = { showDisagreeInput = !showDisagreeInput },
               enabled = !uiState.trustDecisionInFlight,
           ) {
-            Text("Disagree with AI")
+            Text("I disagree")
           }
           if (showDisagreeInput) {
             OutlinedTextField(
@@ -408,6 +408,11 @@ internal fun BackendInvestigationPanel(
       }
 
       if (uiState.trustDecision != null && onReturnToProject != null) {
+        Text(
+            text = "Investigation saved to ${sourceProjectName ?: "your Project"}. Return to review any suggested Project changes.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Button(onClick = onReturnToProject, modifier = Modifier.fillMaxWidth()) {
           Text("Return to ${sourceProjectName ?: "Project"}")
         }
@@ -422,7 +427,7 @@ internal fun BackendInvestigationPanel(
       }
 
       TextButton(onClick = { showDeveloperDetails = !showDeveloperDetails }) {
-        Text(if (showDeveloperDetails) "Hide developer details" else "Developer details")
+        Text(if (showDeveloperDetails) "Hide technical details" else "Technical details")
       }
 
       if (showDeveloperDetails) {

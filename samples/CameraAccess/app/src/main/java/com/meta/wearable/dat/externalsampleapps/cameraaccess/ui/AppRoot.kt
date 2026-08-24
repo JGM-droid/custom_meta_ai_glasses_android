@@ -139,9 +139,11 @@ fun AppRoot(
   when (val screen = topLevelScreen) {
     TopLevelScreen.ProjectsHome ->
         ProjectsHomeScreen(
-            // The existing global entry point - no explicit Project (sourceProject = null), so
-            // the backend's own Active Project fallback / unscoped precedence applies unchanged.
-            onOpenCapture = { topLevelScreen = TopLevelScreen.Capture() },
+            // Quick capture is only offered for the canonical Active Project and that identity
+            // is carried explicitly; capture never silently relies on backend fallback.
+            onOpenCapture = { project ->
+              topLevelScreen = TopLevelScreen.Capture(sourceProject = project)
+            },
             onOpenProject = { project -> topLevelScreen = TopLevelScreen.ProjectDetail(project) },
             onNewProject = { topLevelScreen = TopLevelScreen.NewProject },
             modifier = modifier,

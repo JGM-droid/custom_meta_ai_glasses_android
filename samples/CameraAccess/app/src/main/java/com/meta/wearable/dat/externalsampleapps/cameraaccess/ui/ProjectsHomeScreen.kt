@@ -68,7 +68,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectsVi
 
 @Composable
 fun ProjectsHomeScreen(
-    onOpenCapture: () -> Unit,
+    onOpenCapture: (ProjectSummary) -> Unit,
     onOpenProject: (ProjectSummary) -> Unit,
     onNewProject: () -> Unit,
     modifier: Modifier = Modifier,
@@ -178,17 +178,27 @@ fun ProjectsHomeScreen(
       }
     }
 
+    val loaded = uiState as? ProjectsHomeUiState.Loaded
+    val activeProject = loaded?.projects?.firstOrNull { it.projectId == loaded.activeProjectId }
     OutlinedButton(
-        onClick = onOpenCapture,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+        onClick = { activeProject?.let(onOpenCapture) },
+        enabled = activeProject != null,
+        modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
         shape = RoundedCornerShape(16.dp),
         colors =
             ButtonDefaults.outlinedButtonColors(
                 contentColor = AppColor.InkSecondary,
             ),
     ) {
-      Text("Capture / Test Glasses")
+      Text(activeProject?.let { "Use glasses for ${it.name}" } ?: "Choose a Project to use glasses")
     }
+    Text(
+        text = activeProject?.let { "Quick capture will be saved to ${it.name}." }
+            ?: "Open a Project and make it current before using quick capture.",
+        color = AppColor.InkSecondary,
+        fontSize = 12.sp,
+        modifier = Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 16.dp),
+    )
   }
 }
 

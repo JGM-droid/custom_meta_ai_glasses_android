@@ -28,6 +28,8 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 import android.app.Application
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.background
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,6 +54,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,6 +77,16 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectOve
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProposalActionState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.SavedInvestigationReview
+import kotlinx.coroutines.launch
+
+internal enum class ProjectPrimaryAction { ADD_EVIDENCE, REVIEW_CHANGES, USE_GLASSES }
+
+internal fun projectPrimaryAction(overview: ProjectOverview): ProjectPrimaryAction =
+    when {
+      overview.latestInvestigation?.followUpSessionId != null -> ProjectPrimaryAction.ADD_EVIDENCE
+      overview.pendingProposals.isNotEmpty() -> ProjectPrimaryAction.REVIEW_CHANGES
+      else -> ProjectPrimaryAction.USE_GLASSES
+    }
 
 @Composable
 fun ProjectDetailScreen(
@@ -152,41 +168,69 @@ fun ProjectDetailScreen(
           }
       is ProjectDetailUiState.Loaded -> {
         val overview = state.overview
+        val primaryAction = projectPrimaryAction(overview)
+        val proposalRequester = remember { BringIntoViewRequester() }
+        val scope = rememberCoroutineScope()
         ActiveProjectControl(
             isActive = state.isActive,
             actionState = activeActionState,
             onWorkOnProject = viewModel::setActiveProject,
             onStopWorking = viewModel::clearActiveProject,
         )
-        ProjectSection(
-            title = "Where We Left Off",
-            body = overview.checkpoint.whereWeLeftOff ?: "No current work recorded.",
-        )
-
-        overview.latestInvestigation?.let { investigation ->
-          SavedInvestigationSection(
-              investigation = investigation,
-              onResumeFollowUp = { sessionId -> onResumeInvestigation(project, sessionId) },
+        Text("RESUME / NEEDS ATTENTION", color = AppColor.Accent, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 22.dp))
+        ProjectSection(title = "Where you left off", body = overview.checkpoint.whereWeLeftOff ?: "No current work recorded.")
+        ProjectSection(title = "Next action", body = overview.checkpoint.nextAction ?: "No next action recorded.")
+        if (overview.pendingProposals.isNotEmpty()) {
+          Text(
+              "Investigation saved to ${project.name} — ${overview.pendingProposals.size} suggested change${if (overview.pendingProposals.size == 1) "" else "s"} need review.",
+              color = AppColor.Success,
+              modifier = Modifier.padding(top = 12.dp),
+          )
+        } else if (overview.latestInvestigation != null) {
+          Text("Investigation saved to ${project.name}.", color = AppColor.Success, modifier = Modifier.padding(top = 12.dp))
+        }
+        Button(
+            onClick = {
+              when (primaryAction) {
+                ProjectPrimaryAction.ADD_EVIDENCE -> overview.latestInvestigation?.followUpSessionId?.let { onResumeInvestigation(project, it) }
+                ProjectPrimaryAction.REVIEW_CHANGES -> scope.launch { proposalRequester.bringIntoView() }
+                ProjectPrimaryAction.USE_GLASSES -> onStartWorking(project)
+              }
+            },
+            modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = AppColor.Accent, contentColor = AppColor.AccentInk),
+        ) {
+          Text(
+              when (primaryAction) {
+                ProjectPrimaryAction.ADD_EVIDENCE -> "Add more evidence"
+                ProjectPrimaryAction.REVIEW_CHANGES -> "Review ${overview.pendingProposals.size} suggested change${if (overview.pendingProposals.size == 1) "" else "s"}"
+                ProjectPrimaryAction.USE_GLASSES -> "Use glasses for this Project"
+              },
+              fontWeight = FontWeight.SemiBold,
           )
         }
+
         if (overview.pendingProposals.isNotEmpty()) {
           PendingProposalsSection(
               proposals = overview.pendingProposals,
               actionState = proposalActionState,
               onApply = viewModel::applyProposal,
               onReject = viewModel::rejectProposal,
+              modifier = Modifier.bringIntoViewRequester(proposalRequester),
+          )
+        }
+        overview.latestInvestigation?.let { investigation ->
+          SavedInvestigationSection(
+              investigation = investigation,
+              onResumeFollowUp = { sessionId -> onResumeInvestigation(project, sessionId) },
           )
         }
         overview.investigationLoadError?.let {
           Text("Saved Investigation details unavailable: $it", color = Color(0xFFFF8A80), modifier = Modifier.padding(top = 16.dp))
         }
-        ProjectSection(
-            title = "Next Action",
-            body = overview.checkpoint.nextAction ?: "No next action recorded.",
-        )
-
         Text(
-            text = "RECENT ACTIVITY",
+            text = "PROJECT HISTORY",
             color = AppColor.InkSecondary,
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
@@ -195,19 +239,6 @@ fun ProjectDetailScreen(
         )
         RecentActivityList(overview)
 
-        Button(
-            onClick = { onStartWorking(project) },
-            modifier = Modifier.fillMaxWidth().padding(top = 24.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors =
-                ButtonDefaults.buttonColors(
-                    containerColor = AppColor.Accent,
-                    contentColor = AppColor.AccentInk,
-                ),
-        ) {
-          Text("Start Working with Glasses", fontWeight = FontWeight.SemiBold)
-        }
-
         OutlinedButton(
             onClick = { onContinueProject(project) },
             modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 24.dp),
@@ -215,7 +246,7 @@ fun ProjectDetailScreen(
             colors =
                 ButtonDefaults.outlinedButtonColors(contentColor = AppColor.Accent),
         ) {
-          Text("Continue Project", fontWeight = FontWeight.SemiBold)
+          Text("Open Project workspace", fontWeight = FontWeight.SemiBold)
         }
       }
     }
@@ -227,15 +258,13 @@ private fun SavedInvestigationSection(
     investigation: SavedInvestigationReview,
     onResumeFollowUp: (String) -> Unit,
 ) {
+  var showTechnicalDetails by remember { mutableStateOf(false) }
   Column(
       modifier = Modifier.fillMaxWidth().padding(top = 24.dp).clip(RoundedCornerShape(16.dp))
           .background(Color(0xFF24262B)).padding(16.dp),
   ) {
     Text("RECENT INVESTIGATION", color = AppColor.InkSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-    Text("Your Investigation was saved.", color = AppColor.Success, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
-    Text("Status: ${investigation.status}", color = AppColor.InkSecondary, fontSize = 12.sp)
-    Text("Completed ${investigation.completedAtUtc}", color = AppColor.InkSecondary, fontSize = 12.sp)
-    Text("Session ${investigation.sessionId}", color = AppColor.InkSecondary, fontSize = 11.sp)
+    Text("Investigation saved", color = AppColor.Success, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
     Text("${investigation.evidenceCount} evidence item(s) saved", color = AppColor.InkPrimary, modifier = Modifier.padding(top = 8.dp))
     investigation.retainedImage?.let { bytes ->
       BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { bitmap ->
@@ -251,20 +280,35 @@ private fun SavedInvestigationSection(
       Text("Your explanation", color = AppColor.InkSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
       Text(it, color = AppColor.InkPrimary)
     }
-    Text("AI inference — unconfirmed", color = AppColor.Accent, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
+    Text("AI suggestion — unconfirmed", color = AppColor.Accent, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
     Text(investigation.hypothesis, color = AppColor.InkPrimary, modifier = Modifier.padding(top = 4.dp))
     Text("Recommended next action", color = AppColor.InkSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
     Text(investigation.recommendedNextAction, color = AppColor.InkPrimary)
-    Text("Decision: ${investigation.trustDecision ?: "Not decided"}", color = AppColor.InkSecondary, modifier = Modifier.padding(top = 12.dp))
+    Text("Your assessment: ${trustDecisionLabel(investigation.trustDecision)}", color = AppColor.InkSecondary, modifier = Modifier.padding(top = 12.dp))
     investigation.followUpSessionId?.let { sessionId ->
       OutlinedButton(
           onClick = { onResumeFollowUp(sessionId) },
           modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-      ) { Text("Resume More Evidence") }
+      ) { Text("Add more evidence") }
     }
-
+    TextButton(onClick = { showTechnicalDetails = !showTechnicalDetails }) {
+      Text(if (showTechnicalDetails) "Hide technical details" else "Technical details")
+    }
+    if (showTechnicalDetails) {
+      Text("Status: ${investigation.status}", color = AppColor.InkSecondary, fontSize = 12.sp)
+      Text("Completed ${investigation.completedAtUtc}", color = AppColor.InkSecondary, fontSize = 12.sp)
+      Text("Session ${investigation.sessionId}", color = AppColor.InkSecondary, fontSize = 11.sp)
+    }
   }
 }
+
+internal fun trustDecisionLabel(decision: String?): String =
+    when (decision) {
+      "continue" -> "Kept as working hypothesis"
+      "disagree" -> "You disagreed"
+      "more_evidence" -> "More evidence requested"
+      else -> "Not decided"
+    }
 
 @Composable
 private fun PendingProposalsSection(
@@ -272,14 +316,15 @@ private fun PendingProposalsSection(
     actionState: ProposalActionState,
     onApply: (String) -> Unit,
     onReject: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
   Column(
-      modifier = Modifier.fillMaxWidth().padding(top = 16.dp).clip(RoundedCornerShape(16.dp))
+      modifier = modifier.fillMaxWidth().padding(top = 16.dp).clip(RoundedCornerShape(16.dp))
           .background(Color(0xFF24262B)).padding(16.dp),
   ) {
     proposals.forEachIndexed { index, proposal ->
       Text(
-          "PENDING PROJECT UPDATE ${index + 1} OF ${proposals.size}",
+          "SUGGESTED PROJECT CHANGE — REVIEW REQUIRED · ${index + 1} OF ${proposals.size}",
           color = AppColor.Accent,
           fontWeight = FontWeight.Bold,
           modifier = Modifier.padding(top = 20.dp),
@@ -300,12 +345,13 @@ private fun PendingProposalsSection(
           onClick = { onApply(proposal.proposalId) },
           enabled = !busy,
           modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-      ) { Text("Apply update") }
+      ) { Text("Apply to Project") }
       OutlinedButton(
           onClick = { onReject(proposal.proposalId) },
           enabled = !busy,
           modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-      ) { Text("Reject") }
+      ) { Text("Reject change") }
+      Text("Rejecting keeps the Investigation and evidence in Project history.", color = AppColor.InkSecondary, fontSize = 12.sp)
     }
     when (actionState) {
       is ProposalActionState.Failed -> Text(actionState.message, color = Color(0xFFFF8A80), modifier = Modifier.padding(top = 8.dp))
@@ -336,7 +382,7 @@ internal fun ActiveProjectControl(
       Row(verticalAlignment = Alignment.CenterVertically) {
         Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(AppColor.Success))
         Text(
-            text = "Active Project",
+            text = "Current Project for quick capture",
             color = AppColor.Success,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
@@ -359,7 +405,7 @@ internal fun ActiveProjectControl(
         CircularProgressIndicator(color = AppColor.Accent, modifier = Modifier.size(18.dp))
       } else {
         Text(
-            text = if (isActive) "Stop Working on Project" else "Work on this Project",
+            text = if (isActive) "Stop using for quick capture" else "Make this my current Project",
             fontWeight = FontWeight.SemiBold,
         )
       }

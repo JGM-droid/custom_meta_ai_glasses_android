@@ -11,18 +11,18 @@ class SavedInvestigationProjectDetailContractTest {
   @Test
   fun projectDetailShowsSavedInferenceEvidenceTrustAndPendingApproval() {
     val screen = File(root, "ui/ProjectDetailScreen.kt").readText()
-    assertTrue(screen.contains("Your Investigation was saved."))
-    assertTrue(screen.contains("AI inference — unconfirmed"))
+    assertTrue(screen.contains("Investigation saved"))
+    assertTrue(screen.contains("AI suggestion — unconfirmed"))
     assertTrue(screen.contains("Retained Investigation evidence"))
-    assertTrue(screen.contains("Decision:"))
-    assertTrue(screen.contains("PENDING PROJECT UPDATE"))
+    assertTrue(screen.contains("Your assessment:"))
+    assertTrue(screen.contains("SUGGESTED PROJECT CHANGE — REVIEW REQUIRED"))
     assertTrue(screen.contains("proposals.forEachIndexed"))
     assertTrue(screen.contains("OF \${proposals.size}"))
     assertTrue(screen.contains("proposal.proposalId.take(8)"))
     assertTrue(screen.contains("proposal.reason"))
     assertTrue(screen.contains("proposal.proposedFields"))
-    assertTrue(screen.contains("Apply update"))
-    assertTrue(screen.contains("Reject"))
+    assertTrue(screen.contains("Apply to Project"))
+    assertTrue(screen.contains("Reject change"))
   }
 
   @Test
@@ -48,7 +48,7 @@ class SavedInvestigationProjectDetailContractTest {
     assertTrue(models.contains("val pendingProposals: List<CheckpointProposalReview>"))
     assertTrue(models.contains("val followUpSessionId: String?"))
     assertTrue(screen.contains("proposals.forEach"))
-    assertTrue(screen.contains("Resume More Evidence"))
+    assertTrue(screen.contains("Add more evidence"))
     assertTrue(appRoot.contains("rememberSaveable"))
     assertTrue(appRoot.contains("continuationSessionId"))
     assertTrue(investigationViewModel.contains("SavedStateHandle"))
@@ -63,5 +63,33 @@ class SavedInvestigationProjectDetailContractTest {
     assertFalse(models.contains("storageRef"))
     assertFalse(client.contains("storage_ref"))
     assertFalse(client.contains("RoomDatabase"))
+  }
+
+  @Test
+  fun primaryActionAndGlobalCaptureStayProjectScoped() {
+    val detail = File(root, "ui/ProjectDetailScreen.kt").readText()
+    val home = File(root, "ui/ProjectsHomeScreen.kt").readText()
+    val appRoot = File(root, "ui/AppRoot.kt").readText()
+    assertTrue(detail.contains("ProjectPrimaryAction.ADD_EVIDENCE"))
+    assertTrue(detail.contains("ProjectPrimaryAction.REVIEW_CHANGES"))
+    assertTrue(detail.contains("ProjectPrimaryAction.USE_GLASSES"))
+    assertTrue(detail.indexOf("PendingProposalsSection(") < detail.indexOf("text = \"PROJECT HISTORY\""))
+    assertTrue(home.contains("activeProject?.let(onOpenCapture)"))
+    assertTrue(home.contains("Choose a Project to use glasses"))
+    assertTrue(appRoot.contains("TopLevelScreen.Capture(sourceProject = project)"))
+    assertFalse(appRoot.contains("onOpenCapture = { topLevelScreen = TopLevelScreen.Capture() }"))
+  }
+
+  @Test
+  fun humanLabelsPreserveUnderlyingTrustSemantics() {
+    val panel = File(root, "ui/BackendInvestigationPanel.kt").readText()
+    val detail = File(root, "ui/ProjectDetailScreen.kt").readText()
+    assertTrue(panel.contains("Keep as working hypothesis"))
+    assertTrue(panel.contains("BackendTrustDecision.CONTINUE"))
+    assertTrue(panel.contains("I disagree"))
+    assertTrue(panel.contains("BackendTrustDecision.DISAGREE"))
+    assertTrue(panel.contains("Add more evidence"))
+    assertTrue(panel.contains("BackendTrustDecision.MORE_EVIDENCE"))
+    assertTrue(panel.contains("does not update the Project"))
   }
 }

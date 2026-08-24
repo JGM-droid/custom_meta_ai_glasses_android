@@ -43,7 +43,7 @@ class PhysicalInvestigationWorkflowContractTest {
     assertTrue(panel.contains("BackendTrustDecision.CONTINUE"))
     assertTrue(panel.contains("BackendTrustDecision.DISAGREE"))
     assertTrue(panel.contains("BackendTrustDecision.MORE_EVIDENCE"))
-    assertTrue(panel.contains("AI inference — unconfirmed working hypothesis"))
+    assertTrue(panel.contains("AI SUGGESTION — UNCONFIRMED"))
     assertTrue(viewModel.contains("sourceProjectId ?: return"))
     assertTrue(viewModel.contains("continuationSessionId = followUpId"))
   }
