@@ -76,6 +76,7 @@ fun CameraAccessScaffold(
     sourceProjectName: String? = null,
     continuationSessionId: String? = null,
     onReturnToSourceProject: (() -> Unit)? = null,
+    onProjectHudPhoneHandoff: ((needsReview: Boolean) -> Unit)? = null,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val snackbarHostState = remember { SnackbarHostState() }
@@ -99,6 +100,7 @@ fun CameraAccessScaffold(
                 sourceProjectName = sourceProjectName,
                 continuationSessionId = continuationSessionId,
                 onReturnToSourceProject = onReturnToSourceProject,
+                onProjectHudPhoneHandoff = onProjectHudPhoneHandoff,
             )
         uiState.isRegistered ->
             NonStreamScreen(

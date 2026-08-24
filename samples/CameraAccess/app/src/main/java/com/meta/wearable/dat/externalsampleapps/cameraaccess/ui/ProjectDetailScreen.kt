@@ -95,6 +95,7 @@ fun ProjectDetailScreen(
     onStartWorking: (ProjectSummary) -> Unit,
     onResumeInvestigation: (ProjectSummary, String) -> Unit,
     onContinueProject: (ProjectSummary) -> Unit,
+    focusPendingReview: Boolean = false,
     modifier: Modifier = Modifier,
     viewModel: ProjectDetailViewModel =
         viewModel(
@@ -171,6 +172,11 @@ fun ProjectDetailScreen(
         val primaryAction = projectPrimaryAction(overview)
         val proposalRequester = remember { BringIntoViewRequester() }
         val scope = rememberCoroutineScope()
+        LaunchedEffect(focusPendingReview, overview.pendingProposals.size) {
+          if (focusPendingReview && overview.pendingProposals.isNotEmpty()) {
+            proposalRequester.bringIntoView()
+          }
+        }
         ActiveProjectControl(
             isActive = state.isActive,
             actionState = activeActionState,

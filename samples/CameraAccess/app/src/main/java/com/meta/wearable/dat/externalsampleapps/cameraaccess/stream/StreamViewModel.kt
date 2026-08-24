@@ -43,11 +43,14 @@ import com.meta.wearable.dat.core.selectors.DeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
 import com.meta.wearable.dat.core.session.DeviceSessionState
 import com.meta.wearable.dat.core.types.DeviceSessionError
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectContinuityHudController
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudPhoneHandoff
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceInput
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceSource
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.bitmapToInvestigationEvidence
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.heicBytesToInvestigationEvidence
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.liveCaptureFilename
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.HttpUrlProjectRepository
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -88,6 +91,17 @@ internal class StreamViewModel(
   private var stream: Stream? = null
   private var previousDeviceSessionState: DeviceSessionState? = null
   private val lifecycleController = StreamSessionLifecycleController()
+  private val _projectHudPhoneHandoff = MutableStateFlow<ProjectHudPhoneHandoff?>(null)
+  val projectHudPhoneHandoff: StateFlow<ProjectHudPhoneHandoff?> =
+      _projectHudPhoneHandoff.asStateFlow()
+  private val projectHudController =
+      ProjectContinuityHudController(
+          scope = viewModelScope,
+          repository = HttpUrlProjectRepository(),
+          onPhoneHandoff = { _projectHudPhoneHandoff.value = it },
+          onDisplayError = wearablesViewModel::setRecentError,
+      )
+  private var projectHudProjectId: String? = null
 
   // Presentation queue for buffering frames after color conversion
   private var presentationQueue: PresentationQueue? = null
@@ -175,7 +189,12 @@ internal class StreamViewModel(
             // The SDK handles resume internally via requestCameraOn() → resumeStreaming().
             // Do NOT recreate the stream — just let the SDK resume it.
             Log.d(TAG, "Session resumed from PAUSED — stream stays alive")
+            projectHudController.onSessionReconnected()
             return@collect
+          }
+
+          if (projectHudProjectId != null) {
+            session?.let(projectHudController::attachTo)
           }
 
           videoJob?.cancel()
@@ -232,6 +251,7 @@ internal class StreamViewModel(
           // Tap gesture paused the session — keep the stream alive.
           // The SDK transitions StreamState to PAUSED internally.
           Log.d(TAG, "Session paused (tap gesture) — keeping stream alive for resume")
+          projectHudController.onSessionPaused()
         }
       }
     }
@@ -264,6 +284,12 @@ internal class StreamViewModel(
     presentationQueue = null
     _uiState.update { INITIAL_STATE }
     previousDeviceSessionState = null
+    projectHudController.detach()
+    // The controller intentionally retains only ephemeral presentation state while attached.
+    // Clear this session-local marker so reopening the SAME explicit Project cannot take the
+    // configureProjectHud early-return and render the prior session's Ready snapshot. The next
+    // shared DeviceSession must select the Project again and reload canonical backend state.
+    projectHudProjectId = null
     try {
       stream?.stop()
     } catch (t: Throwable) {
@@ -363,6 +389,22 @@ internal class StreamViewModel(
             }
           }
     }
+  }
+
+  /** Selects the explicit, read-only Project projection without changing Active Project. */
+  fun configureProjectHud(projectId: String?, projectName: String?) {
+    if (projectId.isNullOrBlank() || projectName.isNullOrBlank()) {
+      projectHudProjectId = null
+      projectHudController.detach()
+      return
+    }
+    if (projectHudProjectId == projectId) return
+    projectHudProjectId = projectId
+    projectHudController.selectProject(projectId, projectName)
+  }
+
+  fun consumeProjectHudPhoneHandoff(handoff: ProjectHudPhoneHandoff) {
+    if (_projectHudPhoneHandoff.value == handoff) _projectHudPhoneHandoff.value = null
   }
 
   fun showShareDialog() {

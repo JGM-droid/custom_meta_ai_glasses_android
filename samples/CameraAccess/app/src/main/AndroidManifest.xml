@@ -34,6 +34,10 @@
             android:name="com.meta.wearable.mwdat.CLIENT_TOKEN"
             android:value="${mwdat_client_token}"
             />
+        <!-- Enables supported DAT Display content for the read-only Project HUD. -->
+        <meta-data
+            android:name="com.meta.wearable.mwdat.DAM_ENABLED"
+            android:value="true" />
 
         <activity
             android:name=".MainActivity"

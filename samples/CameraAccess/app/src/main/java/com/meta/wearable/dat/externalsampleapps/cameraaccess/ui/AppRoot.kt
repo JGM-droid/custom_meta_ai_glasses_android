@@ -67,7 +67,7 @@ private sealed interface TopLevelScreen {
 
   data object NewProject : TopLevelScreen
 
-  data class ProjectDetail(val project: ProjectSummary) : TopLevelScreen
+  data class ProjectDetail(val project: ProjectSummary, val focusReview: Boolean = false) : TopLevelScreen
 
   data class ProjectWorkspace(val project: ProjectSummary) : TopLevelScreen
 
@@ -81,7 +81,7 @@ private val TopLevelScreenSaver = listSaver<TopLevelScreen, String>(
       when (screen) {
         TopLevelScreen.ProjectsHome -> listOf("home", "", "", "")
         TopLevelScreen.NewProject -> listOf("new", "", "", "")
-        is TopLevelScreen.ProjectDetail -> listOf("detail", screen.project.projectId, screen.project.name, screen.project.status)
+        is TopLevelScreen.ProjectDetail -> listOf("detail", screen.project.projectId, screen.project.name, screen.project.status, screen.focusReview.toString())
         is TopLevelScreen.ProjectWorkspace -> listOf("workspace", screen.project.projectId, screen.project.name, screen.project.status)
         is TopLevelScreen.Capture -> listOf("capture", screen.sourceProject?.projectId.orEmpty(), screen.sourceProject?.name.orEmpty(), screen.sourceProject?.status.orEmpty(), screen.continuationSessionId.orEmpty())
       }
@@ -92,7 +92,7 @@ private val TopLevelScreenSaver = listSaver<TopLevelScreen, String>(
       }
       when (saved.firstOrNull()) {
         "new" -> TopLevelScreen.NewProject
-        "detail" -> project?.let(TopLevelScreen::ProjectDetail) ?: TopLevelScreen.ProjectsHome
+        "detail" -> project?.let { TopLevelScreen.ProjectDetail(it, saved.getOrNull(4).toBoolean()) } ?: TopLevelScreen.ProjectsHome
         "workspace" -> project?.let(TopLevelScreen::ProjectWorkspace) ?: TopLevelScreen.ProjectsHome
         "capture" -> TopLevelScreen.Capture(project, saved.getOrNull(4)?.takeIf(String::isNotBlank))
         else -> TopLevelScreen.ProjectsHome
@@ -163,6 +163,7 @@ fun AppRoot(
               topLevelScreen = TopLevelScreen.Capture(project, sessionId)
             },
             onContinueProject = { project -> topLevelScreen = TopLevelScreen.ProjectWorkspace(project) },
+            focusPendingReview = screen.focusReview,
             modifier = modifier,
         )
     is TopLevelScreen.ProjectWorkspace ->
@@ -201,6 +202,12 @@ fun AppRoot(
               onReturnToSourceProject =
                   screen.sourceProject?.let { project ->
                     { topLevelScreen = TopLevelScreen.ProjectDetail(project) }
+                  },
+              onProjectHudPhoneHandoff =
+                  screen.sourceProject?.let { project ->
+                    { needsReview ->
+                      topLevelScreen = TopLevelScreen.ProjectDetail(project, focusReview = needsReview)
+                    }
                   },
           )
 

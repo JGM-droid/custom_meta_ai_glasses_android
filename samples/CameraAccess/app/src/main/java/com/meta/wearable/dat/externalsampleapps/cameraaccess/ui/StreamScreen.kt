@@ -52,6 +52,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudPhoneDestination
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.hasActiveInvestigation
@@ -70,6 +71,7 @@ internal fun StreamScreen(
     sourceProjectName: String? = null,
     continuationSessionId: String? = null,
     onReturnToSourceProject: (() -> Unit)? = null,
+    onProjectHudPhoneHandoff: ((needsReview: Boolean) -> Unit)? = null,
     streamViewModel: StreamViewModel =
         viewModel(
             factory =
@@ -96,6 +98,7 @@ internal fun StreamScreen(
         ),
 ) {
   val streamUiState by streamViewModel.uiState.collectAsStateWithLifecycle()
+  val projectHudPhoneHandoff by streamViewModel.projectHudPhoneHandoff.collectAsStateWithLifecycle()
   val investigationUiState by investigationViewModel.uiState.collectAsStateWithLifecycle()
   val showInvestigationReopenAffordance =
       remember(streamUiState.isInvestigationPanelVisible, streamUiState.isShareDialogVisible, investigationUiState) {
@@ -115,7 +118,25 @@ internal fun StreamScreen(
     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
   }
 
-  LaunchedEffect(Unit) { streamViewModel.startStream() }
+  LaunchedEffect(sourceProjectId, sourceProjectName) {
+    // Configure the explicit Project before starting the one shared DeviceSession, so the HUD
+    // can attach to that session as soon as it reaches STARTED.
+    streamViewModel.configureProjectHud(sourceProjectId, sourceProjectName)
+    streamViewModel.startStream()
+  }
+
+  LaunchedEffect(projectHudPhoneHandoff) {
+    projectHudPhoneHandoff?.let { handoff ->
+      // Defense in depth: an event from an old Project can never navigate the current Project.
+      if (handoff.projectId == sourceProjectId) {
+        streamViewModel.stopStream()
+        onProjectHudPhoneHandoff?.invoke(
+            handoff.destination == ProjectHudPhoneDestination.PROJECT_REVIEW
+        )
+      }
+      streamViewModel.consumeProjectHudPhoneHandoff(handoff)
+    }
+  }
 
   Box(modifier = modifier.fillMaxSize()) {
     streamUiState.videoFrame?.let { videoFrame ->
