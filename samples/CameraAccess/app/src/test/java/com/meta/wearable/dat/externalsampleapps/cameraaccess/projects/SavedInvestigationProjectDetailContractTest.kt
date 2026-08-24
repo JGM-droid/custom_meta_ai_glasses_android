@@ -16,6 +16,11 @@ class SavedInvestigationProjectDetailContractTest {
     assertTrue(screen.contains("Retained Investigation evidence"))
     assertTrue(screen.contains("Decision:"))
     assertTrue(screen.contains("PENDING PROJECT UPDATE"))
+    assertTrue(screen.contains("proposals.forEachIndexed"))
+    assertTrue(screen.contains("OF \${proposals.size}"))
+    assertTrue(screen.contains("proposal.proposalId.take(8)"))
+    assertTrue(screen.contains("proposal.reason"))
+    assertTrue(screen.contains("proposal.proposedFields"))
     assertTrue(screen.contains("Apply update"))
     assertTrue(screen.contains("Reject"))
   }

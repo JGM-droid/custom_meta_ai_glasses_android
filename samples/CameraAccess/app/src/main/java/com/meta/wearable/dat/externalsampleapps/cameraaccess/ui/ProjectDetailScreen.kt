@@ -277,9 +277,21 @@ private fun PendingProposalsSection(
       modifier = Modifier.fillMaxWidth().padding(top = 16.dp).clip(RoundedCornerShape(16.dp))
           .background(Color(0xFF24262B)).padding(16.dp),
   ) {
-    proposals.forEach { proposal ->
-      Text("PENDING PROJECT UPDATE", color = AppColor.Accent, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 20.dp))
+    proposals.forEachIndexed { index, proposal ->
+      Text(
+          "PENDING PROJECT UPDATE ${index + 1} OF ${proposals.size}",
+          color = AppColor.Accent,
+          fontWeight = FontWeight.Bold,
+          modifier = Modifier.padding(top = 20.dp),
+      )
       Text("Pending approval", color = AppColor.InkSecondary)
+      Text(
+          "Proposal ${proposal.proposalId.take(8)}",
+          color = AppColor.InkSecondary,
+          fontSize = 11.sp,
+          modifier = Modifier.padding(top = 4.dp),
+      )
+      Text(proposal.reason, color = AppColor.InkPrimary, modifier = Modifier.padding(top = 8.dp))
       proposal.proposedFields.filterValues { value -> value != null }.forEach { (field, value) ->
         Text("${field.replace('_', ' ')} → $value", color = AppColor.InkPrimary, modifier = Modifier.padding(top = 6.dp))
       }
