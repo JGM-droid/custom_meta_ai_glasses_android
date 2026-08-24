@@ -481,8 +481,6 @@ private fun WorkspaceComposer(
     modifier: Modifier = Modifier,
 ) {
   val isSubmitting = askState is ProjectAskState.Submitting
-  // Whitespace-only input can never submit - trimmed the same way the ViewModel itself checks.
-  val canSubmit = text.isNotBlank() && !isSubmitting
   // speechUiState is shared with RecordProgressPanel's five fields (see voiceTarget in
   // ProjectWorkspaceScreen). Only show this composer as "listening"/with its own feedback and
   // Cancel when it is actually the active target - otherwise a voice session started from a
@@ -490,6 +488,14 @@ private fun WorkspaceComposer(
   val isThisComposerListening =
       voiceTarget == VoiceTarget.ASK_COMPOSER && speechUiState.phase == InvestigationSpeechUiPhase.LISTENING
   val anyVoiceSessionActive = speechUiState.phase == InvestigationSpeechUiPhase.LISTENING
+  // Whitespace-only input can never submit - trimmed the same way the ViewModel itself checks.
+  // Also blocked while ANY voice session is listening (not just this composer's own): if the
+  // target is this composer, submitting now would race the not-yet-landed transcript, appending
+  // it into draftText after Answered may have already cleared it; if the target is a Record
+  // Progress field, this field's mic is disabled anyway (micEnabled below), so text can't be
+  // mid-dictation here, but the guard is unconditional on "any session" for one simple rule
+  // rather than a per-target special case.
+  val canSubmit = text.isNotBlank() && !isSubmitting && !anyVoiceSessionActive
   // Can't start a new voice session while ANY field's session is already listening (this
   // composer's or a Record Progress field's - the on-device recognizer only serves one at a
   // time) or while a question is in flight - and can't submit Ask while voice is listening, since
@@ -755,6 +761,11 @@ private fun RecordProgressPanel(
     onCancelListening: () -> Unit,
 ) {
   val locked = state is ProjectProgressState.Previewing || state is ProjectProgressState.Saving
+  // A field's own OutlinedTextField stays editable while its mic listens (only `locked` disables
+  // it), but Preview/Save must not fire mid-dictation: previewProgress()/saveProgress() would run
+  // against text that's about to change out from under the user, and a transcript landing after
+  // Save clears the fields would silently repopulate one with orphaned, never-saved text.
+  val voiceSessionActive = speechUiState.phase == InvestigationSpeechUiPhase.LISTENING
   Column(modifier = Modifier.fillMaxWidth().padding(top = 24.dp).testTag("record_progress_panel")) {
     Text("RECORD PROJECT PROGRESS", color = AppColor.InkSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
     Text(
@@ -825,13 +836,15 @@ private fun RecordProgressPanel(
       is ProjectProgressState.Failed -> Text(state.message, color = Color(0xFFFF9B9B), modifier = Modifier.padding(top = 10.dp))
     }
 
-    val canPreview = summary.isNotBlank() && !locked && state !is ProjectProgressState.PreviewReady
+    val canPreview = summary.isNotBlank() && !locked && !voiceSessionActive && state !is ProjectProgressState.PreviewReady
     Button(
         onClick = onPreview,
         enabled = canPreview,
         modifier = Modifier.fillMaxWidth().padding(top = 10.dp).testTag("record_progress_preview_button"),
     ) { Text("Preview") }
-    val canSave = state is ProjectProgressState.PreviewReady || (state is ProjectProgressState.Failed && state.preview != null)
+    val canSave =
+        !voiceSessionActive &&
+            (state is ProjectProgressState.PreviewReady || (state is ProjectProgressState.Failed && state.preview != null))
     Button(
         onClick = onSave,
         enabled = canSave,

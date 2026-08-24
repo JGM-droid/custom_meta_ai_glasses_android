@@ -112,6 +112,27 @@ class ProjectWorkspaceScreenTest {
   }
 
   @Test
+  fun askButtonIsDisabledWhileComposerVoiceIsListeningAndReenabledOnceTranscriptLands() {
+    // Regression coverage: previously canSubmit only checked isSubmitting, not voice-listening
+    // state, despite an adjacent comment claiming otherwise - Ask Project could fire while a
+    // transcript was still in flight, and the transcript would land afterward into whatever
+    // draftText held at that point (possibly already cleared by the Answered effect).
+    val fakeController = FakeSpeechRecognizerController()
+    setWorkspaceContent(projectA, fakeController)
+
+    composeTestRule.onNodeWithTag("workspace_composer_input").performTextInput("Check voltage.")
+    composeTestRule.onNodeWithTag("workspace_mic_button").performClick()
+    composeTestRule.waitUntilExactlyOneExists(hasText("Listening..."), timeoutMillis = 15_000L)
+
+    composeTestRule.onNodeWithTag("workspace_ask_button").assertIsNotEnabled()
+
+    composeTestRule.runOnUiThread {
+      fakeController.completeWith(InvestigationSpeechEvent.FinalTranscript("At the contactor."))
+    }
+    composeTestRule.onNodeWithTag("workspace_ask_button").assertIsEnabled()
+  }
+
+  @Test
   fun transcriptionAppendsToExistingDraftRatherThanReplacingIt() {
     val fakeController = FakeSpeechRecognizerController()
     setWorkspaceContent(projectA, fakeController)
@@ -319,6 +340,29 @@ class ProjectWorkspaceScreenTest {
     composeTestRule.onNodeWithTag("record_progress_summary_mic_cancel").performClick()
 
     composeTestRule.onNodeWithTag("record_progress_summary").assertTextContains("Typed before speaking.", substring = true)
+  }
+
+  @Test
+  fun previewButtonIsDisabledWhileAProgressFieldVoiceSessionIsListening() {
+    // Regression coverage for the same class of race as
+    // askButtonIsDisabledWhileComposerVoiceIsListeningAndReenabledOnceTranscriptLands, but for
+    // Record Progress: Preview/Save must not run against a field that's still mid-dictation, and
+    // a transcript must never land after Save has already cleared the fields.
+    val fakeController = FakeSpeechRecognizerController()
+    setWorkspaceContent(projectA, fakeController)
+    openRecordProgress()
+
+    composeTestRule.onNodeWithTag("record_progress_summary").performTextInput("Replaced the capacitor.")
+    composeTestRule.onNodeWithTag("record_progress_preview_button").assertIsEnabled()
+
+    composeTestRule.onNodeWithTag("record_progress_summary_mic").performClick()
+    composeTestRule.waitUntilExactlyOneExists(hasTestTag("record_progress_summary_mic_cancel"), timeoutMillis = 15_000L)
+    composeTestRule.onNodeWithTag("record_progress_preview_button").assertIsNotEnabled()
+
+    composeTestRule.runOnUiThread {
+      fakeController.completeWith(InvestigationSpeechEvent.FinalTranscript("It was leaking refrigerant."))
+    }
+    composeTestRule.onNodeWithTag("record_progress_preview_button").assertIsEnabled()
   }
 
   @Test

@@ -18,7 +18,8 @@
 // canonical project_id - the same identity value carried through AppRoot navigation into
 // ProjectDetailScreen, with no separate Android-only id anywhere.
 //
-// "+ New Project" remains non-functional in this slice (project creation is a later slice).
+// "+ New Project" performs real Project creation (POST /projects) via NewProjectScreen, reached
+// through AppRoot's TopLevelScreen.NewProject route.
 // "Capture / Test Glasses" hands off to AppRoot to show the existing, unmodified Meta
 // camera/capture flow.
 
