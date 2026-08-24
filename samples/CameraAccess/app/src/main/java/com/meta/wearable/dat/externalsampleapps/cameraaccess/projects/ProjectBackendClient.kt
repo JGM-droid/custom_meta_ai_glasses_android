@@ -60,6 +60,14 @@ interface ProjectApi {
   /** Read-only: asks THIS project's real backend Q&A route a question. Never mutates Project state. */
   suspend fun askProject(projectId: String, question: String): ProjectAskAnswer
 
+  suspend fun getProjectIdeas(projectId: String): ProjectIdeasProjection
+
+  suspend fun generateProjectIdeas(projectId: String, intent: String, idempotencyKey: String): ProjectIdeasExecutionResult
+
+  suspend fun setProjectIdeaDisposition(projectId: String, ideaId: String, disposition: String, idempotencyKey: String): ProjectIdeasProjection
+
+  suspend fun promoteProjectIdea(projectId: String, ideaId: String)
+
   suspend fun applyCheckpointProposal(projectId: String, proposalId: String)
 
   suspend fun rejectCheckpointProposal(projectId: String, proposalId: String)
@@ -219,6 +227,67 @@ internal class HttpUrlProjectApi(
     )
   }
 
+  override suspend fun getProjectIdeas(projectId: String): ProjectIdeasProjection =
+      executeJsonObject(path = "/projects/${normalizeId(projectId)}/interactions/explore").toProjectIdeasProjection()
+
+  override suspend fun generateProjectIdeas(projectId: String, intent: String, idempotencyKey: String): ProjectIdeasExecutionResult {
+    val normalizedProjectId = normalizeId(projectId)
+    val body = JSONObject().apply {
+      put("user_intent", intent)
+      put("input_refs", JSONArray())
+      put("idempotency_key", idempotencyKey)
+    }
+    val response = executeJsonObject(
+        path = "/projects/$normalizedProjectId/interactions/explore",
+        method = "POST",
+        body = body.toString(),
+    )
+    if (response.getString("project_id") != normalizedProjectId) {
+      throw ProjectApiException(200, "project_mismatch", "Backend returned ideas for a different Project.")
+    }
+    return when (response.getString("result_type")) {
+      "OPTION_SET" -> {
+        val projection = getProjectIdeas(normalizedProjectId)
+        if (projection.projectId != normalizedProjectId) {
+          throw ProjectApiException(200, "project_mismatch", "Backend returned ideas for a different Project.")
+        }
+        ProjectIdeasExecutionResult.Options(projection)
+      }
+      "INFORMATION_REQUEST" -> {
+        val prompt = response.optJSONObject("information_request")?.optNullableString("prompt")
+            ?: response.optNullableString("message")
+            ?: "More information is needed before suggestions can be created."
+        ProjectIdeasExecutionResult.InformationRequest(prompt)
+      }
+      else -> throw ProjectApiException(200, "invalid_response", "Backend returned an unsupported ideas result.")
+    }
+  }
+
+  override suspend fun setProjectIdeaDisposition(
+      projectId: String,
+      ideaId: String,
+      disposition: String,
+      idempotencyKey: String,
+  ): ProjectIdeasProjection {
+    val body = JSONObject().apply {
+      put("disposition", disposition)
+      put("idempotency_key", idempotencyKey)
+    }
+    val response = executeJsonObject(
+        path = "/projects/${normalizeId(projectId)}/ideas/${normalizeId(ideaId)}/disposition",
+        method = "POST",
+        body = body.toString(),
+    )
+    return response.getJSONObject("projection").toProjectIdeasProjection()
+  }
+
+  override suspend fun promoteProjectIdea(projectId: String, ideaId: String) {
+    executeJsonObject(
+        path = "/projects/${normalizeId(projectId)}/ideas/${normalizeId(ideaId)}/promote",
+        method = "POST",
+    )
+  }
+
   override suspend fun applyCheckpointProposal(projectId: String, proposalId: String) {
     executeJsonObject(path = "/projects/${normalizeId(projectId)}/checkpoint-proposals/${normalizeId(proposalId)}/apply", method = "POST")
   }
@@ -236,6 +305,32 @@ internal class HttpUrlProjectApi(
         status = getString("status"),
         reason = getString("reason"),
         proposedFields = fields,
+    )
+  }
+
+  private fun JSONObject.toProjectIdeasProjection(): ProjectIdeasProjection {
+    val options = mutableListOf<ProjectIdeaOption>()
+    val groups = optJSONArray("option_sets") ?: JSONArray()
+    for (groupIndex in 0 until groups.length()) {
+      val groupOptions = groups.getJSONObject(groupIndex).optJSONArray("options") ?: JSONArray()
+      for (optionIndex in 0 until groupOptions.length()) {
+        val option = groupOptions.getJSONObject(optionIndex)
+        val idea = option.getJSONObject("idea")
+        options += ProjectIdeaOption(
+            ideaId = idea.getString("activity_id"),
+            ordinal = option.getInt("ordinal"),
+            summary = idea.getString("summary"),
+            details = idea.optNullableString("details"),
+            disposition = option.optNullableString("disposition"),
+            promoted = option.optBoolean("promoted", false),
+        )
+      }
+    }
+    val preferred = optJSONObject("preferred_direction")?.optJSONObject("idea")?.optNullableString("activity_id")
+    return ProjectIdeasProjection(
+        projectId = getString("project_id"),
+        options = options,
+        preferredIdeaId = preferred,
     )
   }
 

@@ -68,6 +68,14 @@ interface ProjectRepository {
    */
   suspend fun askProject(projectId: String, question: String): ProjectAskAnswer
 
+  suspend fun getProjectIdeas(projectId: String): ProjectIdeasProjection
+
+  suspend fun generateProjectIdeas(projectId: String, intent: String, idempotencyKey: String): ProjectIdeasExecutionResult
+
+  suspend fun setProjectIdeaDisposition(projectId: String, ideaId: String, disposition: String, idempotencyKey: String): ProjectIdeasProjection
+
+  suspend fun promoteProjectIdea(projectId: String, ideaId: String)
+
   suspend fun applyCheckpointProposal(projectId: String, proposalId: String)
 
   suspend fun rejectCheckpointProposal(projectId: String, proposalId: String)
@@ -94,6 +102,16 @@ class HttpUrlProjectRepository(
 
   override suspend fun askProject(projectId: String, question: String): ProjectAskAnswer =
       api.askProject(projectId, question)
+
+  override suspend fun getProjectIdeas(projectId: String) = api.getProjectIdeas(projectId)
+
+  override suspend fun generateProjectIdeas(projectId: String, intent: String, idempotencyKey: String) =
+      api.generateProjectIdeas(projectId, intent, idempotencyKey)
+
+  override suspend fun setProjectIdeaDisposition(projectId: String, ideaId: String, disposition: String, idempotencyKey: String) =
+      api.setProjectIdeaDisposition(projectId, ideaId, disposition, idempotencyKey)
+
+  override suspend fun promoteProjectIdea(projectId: String, ideaId: String) = api.promoteProjectIdea(projectId, ideaId)
 
   override suspend fun applyCheckpointProposal(projectId: String, proposalId: String) =
       api.applyCheckpointProposal(projectId, proposalId)
@@ -200,6 +218,27 @@ class MockProjectRepository : ProjectRepository {
         modelCallCount = 1,
     )
   }
+
+  override suspend fun getProjectIdeas(projectId: String) =
+      ProjectIdeasProjection(projectId, emptyList(), null)
+
+  override suspend fun generateProjectIdeas(projectId: String, intent: String, idempotencyKey: String) =
+      ProjectIdeasExecutionResult.Options(
+          ProjectIdeasProjection(
+              projectId,
+              listOf(
+                  ProjectIdeaOption("mock-1", 1, "Warm modern", "Warm wood and soft neutrals.", null, false),
+                  ProjectIdeaOption("mock-2", 2, "Dark contemporary", "Deep contrast and restrained accents.", null, false),
+                  ProjectIdeaOption("mock-3", 3, "Minimal natural", "Natural textures and a quiet palette.", null, false),
+              ),
+              null,
+          ),
+      )
+
+  override suspend fun setProjectIdeaDisposition(projectId: String, ideaId: String, disposition: String, idempotencyKey: String) =
+      getProjectIdeas(projectId)
+
+  override suspend fun promoteProjectIdea(projectId: String, ideaId: String) = Unit
 
   override suspend fun applyCheckpointProposal(projectId: String, proposalId: String) {
     require(overviews.containsKey(projectId))

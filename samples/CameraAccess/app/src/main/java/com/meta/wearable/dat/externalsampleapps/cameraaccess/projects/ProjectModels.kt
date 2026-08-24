@@ -113,3 +113,23 @@ data class ProjectAskAnswer(
     val providerModel: String?,
     val modelCallCount: Int,
 )
+
+data class ProjectIdeaOption(
+    val ideaId: String,
+    val ordinal: Int,
+    val summary: String,
+    val details: String?,
+    val disposition: String?,
+    val promoted: Boolean,
+)
+
+data class ProjectIdeasProjection(
+    val projectId: String,
+    val options: List<ProjectIdeaOption>,
+    val preferredIdeaId: String?,
+)
+
+sealed interface ProjectIdeasExecutionResult {
+  data class Options(val projection: ProjectIdeasProjection) : ProjectIdeasExecutionResult
+  data class InformationRequest(val prompt: String) : ProjectIdeasExecutionResult
+}

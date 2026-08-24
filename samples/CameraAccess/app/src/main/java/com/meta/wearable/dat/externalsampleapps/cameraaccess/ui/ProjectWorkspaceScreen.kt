@@ -127,6 +127,9 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectAsk
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectAskState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailUiState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectIdeaOption
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectIdeasState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectOverview
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
 
 // internal (not public): speechControllerFactory's parameter type (InvestigationSpeechRecognizerController,
@@ -159,6 +162,7 @@ internal fun ProjectWorkspaceScreen(
   val uiState by viewModel.uiState.collectAsState()
   val activeActionState by viewModel.activeActionState.collectAsState()
   val askState by viewModel.askState.collectAsState()
+  val ideasState by viewModel.ideasState.collectAsState()
 
   // Composer text - reset whenever this composable is instantiated fresh for a different
   // project_id (a brand-new `remember` scope), so Project A's typed question can never bleed
@@ -166,6 +170,9 @@ internal fun ProjectWorkspaceScreen(
   // keyed by project.projectId below - a brand-new ProjectDetailViewModel (and Idle askState)
   // is created per distinct Project automatically.
   var draftText by remember(project.projectId) { mutableStateOf("") }
+  var showContinue by remember(project.projectId) { mutableStateOf(false) }
+  var showIdeas by remember(project.projectId) { mutableStateOf(false) }
+  var ideasIntent by remember(project.projectId) { mutableStateOf("") }
 
   // Cleared only once a real answer comes back - never on submit (nothing to lose if it fails)
   // and never on failure (the question must stay editable for retry).
@@ -298,7 +305,27 @@ internal fun ProjectWorkspaceScreen(
           AskAnswerCard(question = answeredState.question, answer = answeredState.answer)
         }
 
-        WorkspaceActions(onOpenCapture = onOpenCapture)
+        WorkspaceActions(
+            overview = overview,
+            showContinue = showContinue,
+            onContinue = { showContinue = true },
+            onOpenCapture = onOpenCapture,
+            onGetIdeas = {
+              showIdeas = true
+              viewModel.loadIdeas()
+            },
+        )
+
+        if (showIdeas) {
+          ProjectIdeasPanel(
+              intent = ideasIntent,
+              onIntentChange = { ideasIntent = it },
+              state = ideasState,
+              onGenerate = { viewModel.generateIdeas(ideasIntent) },
+              onDisposition = viewModel::setIdeaDisposition,
+              onPromote = viewModel::promoteIdea,
+          )
+        }
 
         RecentActivityPreview(overview.recentActivity)
 
@@ -338,7 +365,7 @@ private fun WorkspaceComposer(
 
   Column(modifier = modifier.padding(top = 28.dp)) {
     Text(
-        text = "WHAT ARE YOU WORKING ON?",
+        text = "WHAT DO YOU NEED HELP WITH?",
         color = AppColor.InkSecondary,
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
@@ -351,7 +378,7 @@ private fun WorkspaceComposer(
         // unambiguous for the duration of the request, matching what the backend actually
         // received. Failure re-enables editing automatically (isSubmitting becomes false).
         enabled = !isSubmitting,
-        placeholder = { Text("Ask your Project anything...", color = AppColor.InkSecondary) },
+        placeholder = { Text("Ask about this Project...", color = AppColor.InkSecondary) },
         minLines = 3,
         // Capped rather than unbounded - a very long question scrolls inside the field instead of
         // growing it indefinitely (the backend's own question limit is 1000 characters anyway).
@@ -373,8 +400,7 @@ private fun WorkspaceComposer(
             ),
     )
 
-    // The mic is now real (see file header); the camera/evidence affordance stays reserved but
-    // disabled - it represents a later inline capture shortcut, not this slice's scope.
+    // Voice is only another way to fill the same read-only Ask draft.
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.padding(top = 10.dp),
@@ -400,15 +426,6 @@ private fun WorkspaceComposer(
           Text("Cancel", color = AppColor.Accent, fontSize = 12.sp)
         }
       }
-      Spacer(modifier = Modifier.width(16.dp))
-      IconButton(onClick = {}, enabled = false) {
-        Icon(Icons.Filled.CameraAlt, contentDescription = "Evidence capture - coming soon", tint = AppColor.InkSecondary)
-      }
-      Text(
-          text = "Evidence capture - coming soon",
-          color = AppColor.InkSecondary,
-          fontSize = 12.sp,
-      )
     }
 
     speechUiState.feedbackMessage?.let { message ->
@@ -442,6 +459,12 @@ private fun WorkspaceComposer(
           modifier = Modifier.padding(top = 10.dp).testTag("workspace_ask_error"),
       )
     }
+    Text(
+        text = "Answers use information already saved with this Project. External research, media, and instructions are not available yet.",
+        color = AppColor.InkSecondary,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(top = 8.dp),
+    )
   }
 }
 
@@ -463,7 +486,7 @@ private fun AskAnswerCard(question: String, answer: ProjectAskAnswer, modifier: 
         fontSize = 13.sp,
     )
     Text(
-        text = "PROJECT ASSISTANT",
+        text = "AI ANSWER — BASED ON SAVED PROJECT INFORMATION",
         color = AppColor.Accent,
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
@@ -475,11 +498,55 @@ private fun AskAnswerCard(question: String, answer: ProjectAskAnswer, modifier: 
         color = AppColor.InkPrimary,
         modifier = Modifier.padding(top = 6.dp),
     )
+    val groundingLabel =
+        when (answer.groundingStatus) {
+          "grounded" -> "Grounded in saved Project information"
+          "partial" -> "Partially grounded — some information may be missing"
+          "insufficient_context" -> "Not enough saved Project information"
+          else -> "Grounding status unavailable"
+        }
+    Text(
+        text = groundingLabel,
+        color = AppColor.InkSecondary,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(top = 8.dp).testTag("workspace_ask_grounding"),
+    )
+    if (answer.insufficientContext || !answer.uncertaintyNote.isNullOrBlank()) {
+      Text(
+          text =
+              answer.uncertaintyNote
+                  ?: "This Project does not contain enough saved information for a complete answer.",
+          color = AppColor.InkSecondary,
+          fontSize = 12.sp,
+          modifier = Modifier.padding(top = 8.dp).testTag("workspace_ask_uncertainty"),
+      )
+    }
+    if (answer.referenceSummaries.isNotEmpty()) {
+      Text(
+          text = "Based on: ${answer.referenceSummaries.take(3).joinToString(" · ")}",
+          color = AppColor.InkSecondary,
+          fontSize = 12.sp,
+          modifier = Modifier.padding(top = 8.dp).testTag("workspace_ask_provenance"),
+      )
+    }
+    Text(
+        text = "This answer does not change your Project.",
+        color = AppColor.InkSecondary,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(top = 8.dp).testTag("workspace_ask_no_mutation"),
+    )
   }
 }
 
 @Composable
-private fun WorkspaceActions(onOpenCapture: () -> Unit, modifier: Modifier = Modifier) {
+private fun WorkspaceActions(
+    overview: ProjectOverview,
+    showContinue: Boolean,
+    onContinue: () -> Unit,
+    onOpenCapture: () -> Unit,
+    onGetIdeas: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
   Column(modifier = modifier.padding(top = 24.dp)) {
     Text(
         text = "PROJECT ACTIONS",
@@ -488,13 +555,114 @@ private fun WorkspaceActions(onOpenCapture: () -> Unit, modifier: Modifier = Mod
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 1.sp,
     )
+    Button(
+        onClick = onContinue,
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp).testTag("workspace_continue_button"),
+        shape = RoundedCornerShape(16.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = AppColor.Accent, contentColor = AppColor.AccentInk),
+    ) {
+      Text("Continue where I left off", fontWeight = FontWeight.SemiBold)
+    }
     OutlinedButton(
         onClick = onOpenCapture,
-        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp).testTag("workspace_add_photos_button"),
         shape = RoundedCornerShape(16.dp),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = AppColor.Accent),
     ) {
-      Text("Use glasses for this Project", fontWeight = FontWeight.SemiBold)
+      Text("Add photos", fontWeight = FontWeight.SemiBold)
+    }
+    OutlinedButton(
+        onClick = onGetIdeas,
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp).testTag("workspace_get_ideas_button"),
+        shape = RoundedCornerShape(16.dp),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = AppColor.Accent),
+    ) {
+      Text("Get ideas", fontWeight = FontWeight.SemiBold)
+    }
+    if (showContinue) {
+      Text(
+          text = "Where you left off: ${overview.checkpoint.whereWeLeftOff ?: "No current work recorded."}\nNext: ${overview.checkpoint.nextAction ?: "No next action recorded."}",
+          color = AppColor.InkPrimary,
+          modifier = Modifier.padding(top = 12.dp).testTag("workspace_continue_summary"),
+      )
+    }
+  }
+}
+
+@Composable
+private fun ProjectIdeasPanel(
+    intent: String,
+    onIntentChange: (String) -> Unit,
+    state: ProjectIdeasState,
+    onGenerate: () -> Unit,
+    onDisposition: (String, String) -> Unit,
+    onPromote: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+  val busy = state is ProjectIdeasState.Loading
+  Column(modifier = modifier.fillMaxWidth().padding(top = 24.dp).testTag("workspace_ideas_panel")) {
+    Text("IDEAS FOR THIS PROJECT", color = AppColor.InkSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        "AI suggestions stay unconfirmed. A preference, Roadmap item, and applied Project change are separate.",
+        color = AppColor.InkSecondary,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(top = 6.dp),
+    )
+    OutlinedTextField(
+        value = intent,
+        onValueChange = onIntentChange,
+        enabled = !busy,
+        placeholder = { Text("For example: Give me three directions for this room") },
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp).testTag("workspace_ideas_input"),
+    )
+    Button(
+        onClick = onGenerate,
+        enabled = intent.isNotBlank() && !busy,
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp).testTag("workspace_generate_ideas_button"),
+    ) {
+      if (busy) CircularProgressIndicator(modifier = Modifier.size(20.dp)) else Text("Get ideas")
+    }
+    when (state) {
+      ProjectIdeasState.Idle -> Unit
+      ProjectIdeasState.Loading -> Text("Loading Project ideas…", color = AppColor.InkSecondary, modifier = Modifier.padding(top = 10.dp))
+      is ProjectIdeasState.Failed -> Text(state.message, color = Color(0xFFFF9B9B), modifier = Modifier.padding(top = 10.dp))
+      is ProjectIdeasState.Ready -> {
+        state.message?.let { Text(it, color = AppColor.Success, modifier = Modifier.padding(top = 10.dp)) }
+        if (state.projection.options.isEmpty()) {
+          Text("No saved suggestions yet.", color = AppColor.InkSecondary, modifier = Modifier.padding(top = 10.dp))
+        } else {
+          state.projection.options.forEach { option ->
+            ProjectIdeaCard(
+                option = option,
+                preferred = state.projection.preferredIdeaId == option.ideaId,
+                onDisposition = onDisposition,
+                onPromote = onPromote,
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun ProjectIdeaCard(
+    option: ProjectIdeaOption,
+    preferred: Boolean,
+    onDisposition: (String, String) -> Unit,
+    onPromote: (String) -> Unit,
+) {
+  Column(modifier = Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(16.dp)).background(AppColor.Surface).padding(14.dp)) {
+    Text("${option.ordinal}. ${option.summary}${if (preferred) " · Preferred direction" else ""}", color = AppColor.InkPrimary, fontWeight = FontWeight.SemiBold)
+    option.details?.let { Text(it, color = AppColor.InkSecondary, modifier = Modifier.padding(top = 4.dp)) }
+    Text("AI suggestion — unconfirmed · ${option.disposition ?: "No decision yet"}", color = AppColor.InkSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 8.dp)) {
+      TextButton(onClick = { onDisposition(option.ideaId, "keep") }) { Text("Keep for consideration") }
+      TextButton(onClick = { onDisposition(option.ideaId, "dismiss") }) { Text("Dismiss") }
+      TextButton(onClick = { onDisposition(option.ideaId, "select") }) { Text("Choose as preferred direction") }
+    }
+    OutlinedButton(onClick = { onPromote(option.ideaId) }, enabled = !option.promoted, modifier = Modifier.fillMaxWidth()) {
+      Text(if (option.promoted) "Added to Roadmap" else "Add to Roadmap")
     }
   }
 }

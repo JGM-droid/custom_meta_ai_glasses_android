@@ -48,6 +48,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 sealed interface ProjectDetailUiState {
   data object Loading : ProjectDetailUiState
@@ -87,6 +88,13 @@ sealed interface ProposalActionState {
   data class Failed(val message: String) : ProposalActionState
 }
 
+sealed interface ProjectIdeasState {
+  data object Idle : ProjectIdeasState
+  data object Loading : ProjectIdeasState
+  data class Ready(val projection: ProjectIdeasProjection, val message: String? = null) : ProjectIdeasState
+  data class Failed(val message: String) : ProjectIdeasState
+}
+
 class ProjectDetailViewModel(
     application: Application,
     private val projectId: String,
@@ -117,6 +125,9 @@ class ProjectDetailViewModel(
 
   private val _proposalActionState = MutableStateFlow<ProposalActionState>(ProposalActionState.Idle)
   val proposalActionState: StateFlow<ProposalActionState> = _proposalActionState.asStateFlow()
+
+  private val _ideasState = MutableStateFlow<ProjectIdeasState>(ProjectIdeasState.Idle)
+  val ideasState: StateFlow<ProjectIdeasState> = _ideasState.asStateFlow()
 
   init {
     loadOverview()
@@ -209,6 +220,99 @@ class ProjectDetailViewModel(
     }
   }
 
+  fun loadIdeas() {
+    _ideasState.value = ProjectIdeasState.Loading
+    viewModelScope.launch {
+      try {
+        val projection = withContext(Dispatchers.IO) { repository.getProjectIdeas(projectId) }
+        _ideasState.value =
+            if (projection.projectId == projectId) ProjectIdeasState.Ready(projection)
+            else ProjectIdeasState.Failed("Backend returned ideas for a different Project.")
+      } catch (exc: Exception) {
+        _ideasState.value = ProjectIdeasState.Failed(exc.message ?: "Could not load saved ideas.")
+      }
+    }
+  }
+
+  fun generateIdeas(intent: String) {
+    val trimmed = intent.trim()
+    if (trimmed.isEmpty() || _ideasState.value is ProjectIdeasState.Loading) return
+    val previousProjection = (_ideasState.value as? ProjectIdeasState.Ready)?.projection
+    _ideasState.value = ProjectIdeasState.Loading
+    viewModelScope.launch {
+      try {
+        val result = withContext(Dispatchers.IO) {
+          repository.generateProjectIdeas(projectId, trimmed, UUID.randomUUID().toString())
+        }
+        when (result) {
+          is ProjectIdeasExecutionResult.Options -> {
+            if (result.projection.projectId != projectId) {
+              _ideasState.value = ProjectIdeasState.Failed("Backend returned ideas for a different Project.")
+            } else {
+              _ideasState.value = ProjectIdeasState.Ready(
+                  result.projection,
+                  "Three AI suggestions were saved with this Project.",
+              )
+            }
+          }
+          is ProjectIdeasExecutionResult.InformationRequest -> {
+            val reloaded =
+                try {
+                  withContext(Dispatchers.IO) { repository.getProjectIdeas(projectId) }
+                } catch (_: Exception) {
+                  null
+                }
+            val projection = preserveIdeasForInformationRequest(projectId, previousProjection, reloaded)
+            _ideasState.value =
+                if (projection != null) ProjectIdeasState.Ready(projection, result.prompt)
+                else ProjectIdeasState.Failed("Backend returned ideas for a different Project.")
+          }
+        }
+      } catch (exc: Exception) {
+        if (exc is ProjectApiException && exc.category == "project_mismatch") {
+          _ideasState.value = ProjectIdeasState.Failed(exc.message)
+          return@launch
+        }
+        // An ambiguous response may follow a successful write. Reconstruct before reporting.
+        try {
+          val projection = withContext(Dispatchers.IO) { repository.getProjectIdeas(projectId) }
+          _ideasState.value = ProjectIdeasState.Ready(projection, "Project state reloaded; review the current suggestions.")
+        } catch (_: Exception) {
+          _ideasState.value = ProjectIdeasState.Failed(exc.message ?: "Could not get ideas.")
+        }
+      }
+    }
+  }
+
+  fun setIdeaDisposition(ideaId: String, disposition: String) {
+    if (_ideasState.value is ProjectIdeasState.Loading) return
+    _ideasState.value = ProjectIdeasState.Loading
+    viewModelScope.launch {
+      try {
+        val projection = withContext(Dispatchers.IO) {
+          repository.setProjectIdeaDisposition(projectId, ideaId, disposition, UUID.randomUUID().toString())
+        }
+        _ideasState.value = ProjectIdeasState.Ready(projection, "Choice saved with this Project; canonical Project state is unchanged.")
+      } catch (exc: Exception) {
+        loadIdeas()
+      }
+    }
+  }
+
+  fun promoteIdea(ideaId: String) {
+    if (_ideasState.value is ProjectIdeasState.Loading) return
+    _ideasState.value = ProjectIdeasState.Loading
+    viewModelScope.launch {
+      try {
+        withContext(Dispatchers.IO) { repository.promoteProjectIdea(projectId, ideaId) }
+        val projection = withContext(Dispatchers.IO) { repository.getProjectIdeas(projectId) }
+        _ideasState.value = ProjectIdeasState.Ready(projection, "Idea added to the Roadmap; the current Project checkpoint is unchanged.")
+      } catch (exc: Exception) {
+        loadIdeas()
+      }
+    }
+  }
+
   fun applyProposal(proposalId: String) = resolveProposal(proposalId, apply = true)
 
   fun rejectProposal(proposalId: String) = resolveProposal(proposalId, apply = false)
@@ -234,4 +338,13 @@ class ProjectDetailViewModel(
       }
     }
   }
+}
+
+internal fun preserveIdeasForInformationRequest(
+    projectId: String,
+    previous: ProjectIdeasProjection?,
+    reloaded: ProjectIdeasProjection?,
+): ProjectIdeasProjection? {
+  val candidate = reloaded ?: previous ?: ProjectIdeasProjection(projectId, emptyList(), null)
+  return candidate.takeIf { it.projectId == projectId }
 }
