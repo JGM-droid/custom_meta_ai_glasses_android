@@ -38,6 +38,7 @@ data class ProjectSummary(
 data class ProjectCheckpoint(
     val whereWeLeftOff: String?,
     val nextAction: String?,
+    val blockers: String? = null,
 )
 
 /** One entry in a project's activity/history - distinct from checkpoint state. */
@@ -74,9 +75,40 @@ data class ProjectOverview(
     val project: ProjectSummary,
     val checkpoint: ProjectCheckpoint,
     val recentActivity: List<ProjectActivityEntry>,
+    val revision: Int = 0,
     val latestInvestigation: SavedInvestigationReview? = null,
     val pendingProposals: List<CheckpointProposalReview> = emptyList(),
     val investigationLoadError: String? = null,
+)
+
+data class ProjectProgressCheckpointPatch(
+    val currentWork: String? = null,
+    val blockers: String? = null,
+    val nextAction: String? = null,
+)
+
+data class ProjectProgressRequest(
+    val idempotencyKey: String,
+    val summary: String,
+    val details: String?,
+    val expectedProjectRevision: Int,
+    val checkpointPatch: ProjectProgressCheckpointPatch?,
+)
+
+data class ProjectProgressPreview(
+    val projectId: String,
+    val idempotencyKey: String,
+    val summary: String,
+    val details: String?,
+    val baseProjectRevision: Int,
+    val effectiveCheckpointPatch: ProjectProgressCheckpointPatch?,
+    val proposalRequired: Boolean,
+)
+
+data class ProjectProgressSaveResult(
+    val projectId: String,
+    val idempotencyKey: String,
+    val reconstructed: Boolean,
 )
 
 /**

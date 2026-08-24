@@ -16,6 +16,55 @@ import org.junit.Test
 class ProjectBackendClientTest {
 
   @Test
+  fun previewProgressSendsCanonicalProjectScopedRequest() {
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val key = "progress-key-1"
+    val recorder = RequestRecorder(
+        """{"project_id":"$projectId","idempotency_key":"$key","summary":"Removed the old motor.","details":"Mount is clear.","base_project_revision":7,"effective_checkpoint_patch":{"current_work":"Old motor removed.","next_action":"Install replacement motor."},"proposal_required":true}""",
+    )
+    val api = HttpUrlProjectApi("http://10.0.2.2:8001", recorder::newConnection)
+    val request = ProjectProgressRequest(
+        idempotencyKey = key,
+        summary = "Removed the old motor.",
+        details = "Mount is clear.",
+        expectedProjectRevision = 7,
+        checkpointPatch = ProjectProgressCheckpointPatch(
+            currentWork = "Old motor removed.",
+            nextAction = "Install replacement motor.",
+        ),
+    )
+
+    val preview = runBlockingTest { api.previewProjectProgress(projectId, request) }
+
+    assertEquals("POST", recorder.connection.requestMethod)
+    assertEquals("/projects/$projectId/progress/preview", recorder.connection.url.path)
+    val body = JSONObject(recorder.connection.output.toString(StandardCharsets.UTF_8.name()))
+    assertEquals(setOf("idempotency_key", "summary", "details", "expected_project_revision", "checkpoint_patch"), body.keyNames())
+    assertEquals(7, body.getInt("expected_project_revision"))
+    assertEquals("Install replacement motor.", body.getJSONObject("checkpoint_patch").getString("next_action"))
+    assertTrue(preview.proposalRequired)
+    assertEquals(projectId, preview.projectId)
+    assertEquals(key, preview.idempotencyKey)
+  }
+
+  @Test
+  fun saveProgressPreservesExplicitProjectIdentityAndReconstructionState() {
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val recorder = RequestRecorder(
+        """{"project_id":"$projectId","idempotency_key":"progress-key-2","activity":{},"proposal":null,"reconstructed":true}""",
+    )
+    val api = HttpUrlProjectApi("http://10.0.2.2:8001", recorder::newConnection)
+    val request = ProjectProgressRequest("progress-key-2", "Reconnected wiring.", null, 7, null)
+
+    val result = runBlockingTest { api.saveProjectProgress(projectId, request) }
+
+    assertEquals("/projects/$projectId/progress", recorder.connection.url.path)
+    assertEquals(projectId, result.projectId)
+    assertEquals("progress-key-2", result.idempotencyKey)
+    assertTrue(result.reconstructed)
+  }
+
+  @Test
   fun listProjectsParsesCanonicalBackendResponse() {
     val recorder = RequestRecorder(listProjectsResponseBody())
     val api = HttpUrlProjectApi(baseUrl = "http://10.0.2.2:8001", connectionFactory = recorder::newConnection)

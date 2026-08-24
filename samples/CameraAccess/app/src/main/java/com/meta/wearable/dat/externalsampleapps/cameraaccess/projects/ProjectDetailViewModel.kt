@@ -95,6 +95,15 @@ sealed interface ProjectIdeasState {
   data class Failed(val message: String) : ProjectIdeasState
 }
 
+sealed interface ProjectProgressState {
+  data object Idle : ProjectProgressState
+  data object Previewing : ProjectProgressState
+  data class PreviewReady(val preview: ProjectProgressPreview) : ProjectProgressState
+  data class Saving(val preview: ProjectProgressPreview) : ProjectProgressState
+  data class Saved(val reconstructed: Boolean) : ProjectProgressState
+  data class Failed(val message: String, val preview: ProjectProgressPreview? = null) : ProjectProgressState
+}
+
 class ProjectDetailViewModel(
     application: Application,
     private val projectId: String,
@@ -129,6 +138,11 @@ class ProjectDetailViewModel(
   private val _ideasState = MutableStateFlow<ProjectIdeasState>(ProjectIdeasState.Idle)
   val ideasState: StateFlow<ProjectIdeasState> = _ideasState.asStateFlow()
 
+  private val _progressState = MutableStateFlow<ProjectProgressState>(ProjectProgressState.Idle)
+  val progressState: StateFlow<ProjectProgressState> = _progressState.asStateFlow()
+
+  private var pendingProgressRequest: ProjectProgressRequest? = null
+
   init {
     loadOverview()
   }
@@ -154,6 +168,104 @@ class ProjectDetailViewModel(
           ProjectDetailUiState.Error(exc.message ?: "Could not reach the backend.")
         }
       }
+    }
+  }
+
+  fun previewProgress(
+      summary: String,
+      details: String,
+      currentWork: String,
+      blockers: String,
+      nextAction: String,
+  ) {
+    val normalizedSummary = summary.trim()
+    if (normalizedSummary.isEmpty() || _progressState.value is ProjectProgressState.Previewing ||
+        _progressState.value is ProjectProgressState.Saving) return
+    val loaded = _uiState.value as? ProjectDetailUiState.Loaded ?: return
+    val patch = ProjectProgressCheckpointPatch(
+        currentWork = currentWork.trim().takeIf(String::isNotEmpty),
+        blockers = blockers.trim().takeIf(String::isNotEmpty),
+        nextAction = nextAction.trim().takeIf(String::isNotEmpty),
+    ).takeIf { it.currentWork != null || it.blockers != null || it.nextAction != null }
+    val request = ProjectProgressRequest(
+        idempotencyKey = UUID.randomUUID().toString(),
+        summary = normalizedSummary,
+        details = details.trim().takeIf(String::isNotEmpty),
+        expectedProjectRevision = loaded.overview.revision,
+        checkpointPatch = patch,
+    )
+    pendingProgressRequest = request
+    _progressState.value = ProjectProgressState.Previewing
+    viewModelScope.launch {
+      try {
+        val preview = withContext(Dispatchers.IO) { repository.previewProjectProgress(projectId, request) }
+        if (preview.projectId != projectId || preview.idempotencyKey != request.idempotencyKey) {
+          throw IllegalStateException("Backend returned a progress preview for a different Project or request.")
+        }
+        if (pendingProgressRequest == request) _progressState.value = ProjectProgressState.PreviewReady(preview)
+      } catch (exc: Exception) {
+        if (pendingProgressRequest == request) {
+          pendingProgressRequest = null
+          _progressState.value = ProjectProgressState.Failed(exc.message ?: "Could not preview Project progress.")
+        }
+      }
+    }
+  }
+
+  fun saveProgress() {
+    val request = pendingProgressRequest ?: return
+    val preview = (_progressState.value as? ProjectProgressState.PreviewReady)?.preview
+        ?: (_progressState.value as? ProjectProgressState.Failed)?.preview
+        ?: return
+    if (_progressState.value is ProjectProgressState.Saving) return
+    _progressState.value = ProjectProgressState.Saving(preview)
+    viewModelScope.launch {
+      try {
+        val result = withContext(Dispatchers.IO) { repository.saveProjectProgress(projectId, request) }
+        completeProgressSave(request, result)
+      } catch (first: Exception) {
+        if (first is ProjectApiException && first.code == 409 && first.category == "revision_conflict") {
+          if (pendingProgressRequest == request) {
+            pendingProgressRequest = null
+            _progressState.value = ProjectProgressState.Failed(
+                "The Project changed after this preview. Preview again before saving.",
+            )
+            loadOverview()
+          }
+          return@launch
+        }
+        // A timeout may hide a successful write. Retry the exact frozen request with the same
+        // idempotency key so the backend reconstructs the one canonical Activity/Proposal.
+        try {
+          val result = withContext(Dispatchers.IO) { repository.saveProjectProgress(projectId, request) }
+          completeProgressSave(request, result)
+        } catch (second: Exception) {
+          if (pendingProgressRequest == request) {
+            _progressState.value = ProjectProgressState.Failed(
+                second.message ?: first.message ?: "Could not confirm whether Project progress was saved.",
+                preview,
+            )
+            // Canonical state is still refreshed; the same frozen request remains available for
+            // an explicit retry and will converge rather than creating another record.
+            loadOverview()
+          }
+        }
+      }
+    }
+  }
+
+  private fun completeProgressSave(request: ProjectProgressRequest, result: ProjectProgressSaveResult) {
+    if (result.projectId != projectId || result.idempotencyKey != request.idempotencyKey ||
+        pendingProgressRequest != request) return
+    pendingProgressRequest = null
+    _progressState.value = ProjectProgressState.Saved(result.reconstructed)
+    loadOverview()
+  }
+
+  fun editProgressDraft() {
+    if (_progressState.value !is ProjectProgressState.Saving) {
+      pendingProgressRequest = null
+      _progressState.value = ProjectProgressState.Idle
     }
   }
 

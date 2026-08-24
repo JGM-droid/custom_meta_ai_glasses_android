@@ -68,6 +68,10 @@ interface ProjectRepository {
    */
   suspend fun askProject(projectId: String, question: String): ProjectAskAnswer
 
+  suspend fun previewProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressPreview
+
+  suspend fun saveProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressSaveResult
+
   suspend fun getProjectIdeas(projectId: String): ProjectIdeasProjection
 
   suspend fun generateProjectIdeas(projectId: String, intent: String, idempotencyKey: String): ProjectIdeasExecutionResult
@@ -103,6 +107,12 @@ class HttpUrlProjectRepository(
   override suspend fun askProject(projectId: String, question: String): ProjectAskAnswer =
       api.askProject(projectId, question)
 
+  override suspend fun previewProjectProgress(projectId: String, request: ProjectProgressRequest) =
+      api.previewProjectProgress(projectId, request)
+
+  override suspend fun saveProjectProgress(projectId: String, request: ProjectProgressRequest) =
+      api.saveProjectProgress(projectId, request)
+
   override suspend fun getProjectIdeas(projectId: String) = api.getProjectIdeas(projectId)
 
   override suspend fun generateProjectIdeas(projectId: String, intent: String, idempotencyKey: String) =
@@ -135,6 +145,7 @@ class MockProjectRepository : ProjectRepository {
                       name = "Upstairs AC Repair",
                       status = "active",
                   ),
+                  revision = 1,
                   checkpoint = ProjectCheckpoint(
                       whereWeLeftOff =
                           "Capacitor appears swollen - suspected cause of the compressor " +
@@ -153,6 +164,7 @@ class MockProjectRepository : ProjectRepository {
                       name = "Custom Meta AI Glasses",
                       status = "active",
                   ),
+                  revision = 1,
                   checkpoint = ProjectCheckpoint(
                       whereWeLeftOff =
                           "Project Assistant navigation shell is wired up on Android; glasses " +
@@ -181,6 +193,7 @@ class MockProjectRepository : ProjectRepository {
     val summary = ProjectSummary(projectId = projectId, name = request.name, status = "active")
     overviews[projectId] = ProjectOverview(
         project = summary,
+        revision = 1,
         checkpoint = ProjectCheckpoint(
             whereWeLeftOff = null,
             nextAction = request.nextAction,
@@ -217,6 +230,22 @@ class MockProjectRepository : ProjectRepository {
         providerModel = null,
         modelCallCount = 1,
     )
+  }
+
+  override suspend fun previewProjectProgress(projectId: String, request: ProjectProgressRequest) =
+      ProjectProgressPreview(
+          projectId = projectId,
+          idempotencyKey = request.idempotencyKey,
+          summary = request.summary,
+          details = request.details,
+          baseProjectRevision = request.expectedProjectRevision,
+          effectiveCheckpointPatch = request.checkpointPatch,
+          proposalRequired = request.checkpointPatch != null,
+      )
+
+  override suspend fun saveProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressSaveResult {
+    require(overviews.containsKey(projectId))
+    return ProjectProgressSaveResult(projectId, request.idempotencyKey, reconstructed = false)
   }
 
   override suspend fun getProjectIdeas(projectId: String) =

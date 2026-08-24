@@ -130,6 +130,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDet
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectIdeaOption
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectIdeasState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectOverview
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectProgressState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
 
 // internal (not public): speechControllerFactory's parameter type (InvestigationSpeechRecognizerController,
@@ -163,6 +164,7 @@ internal fun ProjectWorkspaceScreen(
   val activeActionState by viewModel.activeActionState.collectAsState()
   val askState by viewModel.askState.collectAsState()
   val ideasState by viewModel.ideasState.collectAsState()
+  val progressState by viewModel.progressState.collectAsState()
 
   // Composer text - reset whenever this composable is instantiated fresh for a different
   // project_id (a brand-new `remember` scope), so Project A's typed question can never bleed
@@ -173,12 +175,28 @@ internal fun ProjectWorkspaceScreen(
   var showContinue by remember(project.projectId) { mutableStateOf(false) }
   var showIdeas by remember(project.projectId) { mutableStateOf(false) }
   var ideasIntent by remember(project.projectId) { mutableStateOf("") }
+  var showProgress by remember(project.projectId) { mutableStateOf(false) }
+  var progressSummary by remember(project.projectId) { mutableStateOf("") }
+  var progressDetails by remember(project.projectId) { mutableStateOf("") }
+  var progressCurrentWork by remember(project.projectId) { mutableStateOf("") }
+  var progressBlockers by remember(project.projectId) { mutableStateOf("") }
+  var progressNextAction by remember(project.projectId) { mutableStateOf("") }
 
   // Cleared only once a real answer comes back - never on submit (nothing to lose if it fails)
   // and never on failure (the question must stay editable for retry).
   LaunchedEffect(askState) {
     if (askState is ProjectAskState.Answered) {
       draftText = ""
+    }
+  }
+
+  LaunchedEffect(progressState) {
+    if (progressState is ProjectProgressState.Saved) {
+      progressSummary = ""
+      progressDetails = ""
+      progressCurrentWork = ""
+      progressBlockers = ""
+      progressNextAction = ""
     }
   }
 
@@ -310,11 +328,57 @@ internal fun ProjectWorkspaceScreen(
             showContinue = showContinue,
             onContinue = { showContinue = true },
             onOpenCapture = onOpenCapture,
+            onRecordProgress = {
+              showProgress = true
+              viewModel.editProgressDraft()
+            },
             onGetIdeas = {
               showIdeas = true
               viewModel.loadIdeas()
             },
         )
+
+        if (showProgress) {
+          RecordProgressPanel(
+              checkpoint = overview.checkpoint,
+              summary = progressSummary,
+              details = progressDetails,
+              currentWork = progressCurrentWork,
+              blockers = progressBlockers,
+              nextAction = progressNextAction,
+              state = progressState,
+              onSummaryChange = {
+                progressSummary = it
+                viewModel.editProgressDraft()
+              },
+              onDetailsChange = {
+                progressDetails = it
+                viewModel.editProgressDraft()
+              },
+              onCurrentWorkChange = {
+                progressCurrentWork = it
+                viewModel.editProgressDraft()
+              },
+              onBlockersChange = {
+                progressBlockers = it
+                viewModel.editProgressDraft()
+              },
+              onNextActionChange = {
+                progressNextAction = it
+                viewModel.editProgressDraft()
+              },
+              onPreview = {
+                viewModel.previewProgress(
+                    progressSummary,
+                    progressDetails,
+                    progressCurrentWork,
+                    progressBlockers,
+                    progressNextAction,
+                )
+              },
+              onSave = viewModel::saveProgress,
+          )
+        }
 
         if (showIdeas) {
           ProjectIdeasPanel(
@@ -544,6 +608,7 @@ private fun WorkspaceActions(
     showContinue: Boolean,
     onContinue: () -> Unit,
     onOpenCapture: () -> Unit,
+    onRecordProgress: () -> Unit,
     onGetIdeas: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -562,6 +627,14 @@ private fun WorkspaceActions(
         colors = ButtonDefaults.buttonColors(containerColor = AppColor.Accent, contentColor = AppColor.AccentInk),
     ) {
       Text("Continue where I left off", fontWeight = FontWeight.SemiBold)
+    }
+    OutlinedButton(
+        onClick = onRecordProgress,
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp).testTag("workspace_record_progress_button"),
+        shape = RoundedCornerShape(16.dp),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = AppColor.Accent),
+    ) {
+      Text("Record progress", fontWeight = FontWeight.SemiBold)
     }
     OutlinedButton(
         onClick = onOpenCapture,
@@ -587,6 +660,107 @@ private fun WorkspaceActions(
       )
     }
   }
+}
+
+@Composable
+private fun RecordProgressPanel(
+    checkpoint: com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectCheckpoint,
+    summary: String,
+    details: String,
+    currentWork: String,
+    blockers: String,
+    nextAction: String,
+    state: ProjectProgressState,
+    onSummaryChange: (String) -> Unit,
+    onDetailsChange: (String) -> Unit,
+    onCurrentWorkChange: (String) -> Unit,
+    onBlockersChange: (String) -> Unit,
+    onNextActionChange: (String) -> Unit,
+    onPreview: () -> Unit,
+    onSave: () -> Unit,
+) {
+  val locked = state is ProjectProgressState.Previewing || state is ProjectProgressState.Saving
+  Column(modifier = Modifier.fillMaxWidth().padding(top = 24.dp).testTag("record_progress_panel")) {
+    Text("RECORD PROJECT PROGRESS", color = AppColor.InkSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        "Your note is saved as Project history. Suggested current work, blockers, or next action still require separate approval.",
+        color = AppColor.InkSecondary,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(top = 6.dp),
+    )
+    ProgressField("What happened?", summary, onSummaryChange, locked, "record_progress_summary")
+    ProgressField("Details (optional)", details, onDetailsChange, locked, "record_progress_details")
+    ProgressField("Update current work (optional)", currentWork, onCurrentWorkChange, locked, "record_progress_current_work")
+    ProgressField("Update blockers (optional)", blockers, onBlockersChange, locked, "record_progress_blockers")
+    ProgressField("Update next action (optional)", nextAction, onNextActionChange, locked, "record_progress_next_action")
+
+    when (state) {
+      ProjectProgressState.Idle -> Unit
+      ProjectProgressState.Previewing -> Text("Preparing preview…", color = AppColor.InkSecondary, modifier = Modifier.padding(top = 10.dp))
+      is ProjectProgressState.PreviewReady, is ProjectProgressState.Saving -> {
+        val preview = when (state) {
+          is ProjectProgressState.PreviewReady -> state.preview
+          is ProjectProgressState.Saving -> state.preview
+          else -> error("unreachable")
+        }
+        Column(modifier = Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(16.dp)).background(AppColor.Surface).padding(14.dp).testTag("record_progress_preview")) {
+          Text("Review before saving", color = AppColor.InkPrimary, fontWeight = FontWeight.SemiBold)
+          Text("Project history: ${preview.summary}", color = AppColor.InkPrimary, modifier = Modifier.padding(top = 6.dp))
+          preview.details?.let { Text(it, color = AppColor.InkSecondary, modifier = Modifier.padding(top = 4.dp)) }
+          Text(
+              if (preview.proposalRequired) "Suggested Project changes will be created for separate Apply or Reject review."
+              else "No Project checkpoint change will be proposed.",
+              color = AppColor.InkSecondary,
+              modifier = Modifier.padding(top = 6.dp),
+          )
+          preview.effectiveCheckpointPatch?.let { patch ->
+            patch.currentWork?.let {
+              Text("Where we left off: ${checkpoint.whereWeLeftOff ?: "Not set"} → $it", color = AppColor.InkPrimary, modifier = Modifier.padding(top = 4.dp))
+            }
+            patch.blockers?.let {
+              Text("Blockers: ${checkpoint.blockers ?: "None"} → $it", color = AppColor.InkPrimary, modifier = Modifier.padding(top = 4.dp))
+            }
+            patch.nextAction?.let {
+              Text("Next action: ${checkpoint.nextAction ?: "Not set"} → $it", color = AppColor.InkPrimary, modifier = Modifier.padding(top = 4.dp))
+            }
+          }
+        }
+      }
+      is ProjectProgressState.Saved -> Text(
+          if (state.reconstructed) "Progress was already saved; current Project state was reloaded."
+          else "Progress saved. Current Project state was reloaded.",
+          color = AppColor.Success,
+          modifier = Modifier.padding(top = 10.dp).testTag("record_progress_saved"),
+      )
+      is ProjectProgressState.Failed -> Text(state.message, color = Color(0xFFFF9B9B), modifier = Modifier.padding(top = 10.dp))
+    }
+
+    val canPreview = summary.isNotBlank() && !locked && state !is ProjectProgressState.PreviewReady
+    Button(
+        onClick = onPreview,
+        enabled = canPreview,
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp).testTag("record_progress_preview_button"),
+    ) { Text("Preview") }
+    val canSave = state is ProjectProgressState.PreviewReady || (state is ProjectProgressState.Failed && state.preview != null)
+    Button(
+        onClick = onSave,
+        enabled = canSave,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag("record_progress_save_button"),
+    ) {
+      if (state is ProjectProgressState.Saving) CircularProgressIndicator(modifier = Modifier.size(20.dp)) else Text("Save progress")
+    }
+  }
+}
+
+@Composable
+private fun ProgressField(label: String, value: String, onValueChange: (String) -> Unit, locked: Boolean, tag: String) {
+  OutlinedTextField(
+      value = value,
+      onValueChange = onValueChange,
+      enabled = !locked,
+      label = { Text(label) },
+      modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag(tag),
+  )
 }
 
 @Composable

@@ -60,6 +60,10 @@ interface ProjectApi {
   /** Read-only: asks THIS project's real backend Q&A route a question. Never mutates Project state. */
   suspend fun askProject(projectId: String, question: String): ProjectAskAnswer
 
+  suspend fun previewProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressPreview
+
+  suspend fun saveProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressSaveResult
+
   suspend fun getProjectIdeas(projectId: String): ProjectIdeasProjection
 
   suspend fun generateProjectIdeas(projectId: String, intent: String, idempotencyKey: String): ProjectIdeasExecutionResult
@@ -92,11 +96,13 @@ internal class HttpUrlProjectApi(
     val normalizedProjectId = normalizeId(projectId)
     val project = executeJsonObject(path = "/projects/$normalizedProjectId")
     val summary = project.toProjectSummary()
+    val revision = project.getInt("revision")
 
     val checkpointJson = project.optJSONObject("checkpoint")
     val checkpoint = ProjectCheckpoint(
         whereWeLeftOff = checkpointJson?.optNullableString("current_work"),
         nextAction = checkpointJson?.optNullableString("next_action"),
+        blockers = checkpointJson?.optNullableString("blockers"),
     )
 
     val activitiesJson = executeJsonArray(path = "/projects/$normalizedProjectId/activities")
@@ -163,6 +169,7 @@ internal class HttpUrlProjectApi(
 
     return ProjectOverview(
         project = summary,
+        revision = revision,
         checkpoint = checkpoint,
         recentActivity = recentActivity,
         latestInvestigation = investigation,
@@ -224,6 +231,36 @@ internal class HttpUrlProjectApi(
         provider = response.optNullableString("provider"),
         providerModel = response.optNullableString("provider_model"),
         modelCallCount = response.optInt("model_call_count", 1),
+    )
+  }
+
+  override suspend fun previewProjectProgress(
+      projectId: String,
+      request: ProjectProgressRequest,
+  ): ProjectProgressPreview =
+      executeJsonObject(
+          path = "/projects/${normalizeId(projectId)}/progress/preview",
+          method = "POST",
+          body = request.toJson().toString(),
+      ).toProjectProgressPreview(normalizeId(projectId))
+
+  override suspend fun saveProjectProgress(
+      projectId: String,
+      request: ProjectProgressRequest,
+  ): ProjectProgressSaveResult {
+    val normalizedProjectId = normalizeId(projectId)
+    val response = executeJsonObject(
+        path = "/projects/$normalizedProjectId/progress",
+        method = "POST",
+        body = request.toJson().toString(),
+    )
+    if (response.getString("project_id") != normalizedProjectId) {
+      throw ProjectApiException(200, "project_mismatch", "Backend saved progress for a different Project.")
+    }
+    return ProjectProgressSaveResult(
+        projectId = normalizedProjectId,
+        idempotencyKey = response.getString("idempotency_key"),
+        reconstructed = response.optBoolean("reconstructed", false),
     )
   }
 
@@ -305,6 +342,43 @@ internal class HttpUrlProjectApi(
         status = getString("status"),
         reason = getString("reason"),
         proposedFields = fields,
+    )
+  }
+
+  private fun ProjectProgressRequest.toJson() = JSONObject().apply {
+    put("idempotency_key", idempotencyKey)
+    put("summary", summary)
+    details?.let { put("details", it) }
+    put("expected_project_revision", expectedProjectRevision)
+    checkpointPatch?.let { patch ->
+      put("checkpoint_patch", JSONObject().apply {
+        patch.currentWork?.let { put("current_work", it) }
+        patch.blockers?.let { put("blockers", it) }
+        patch.nextAction?.let { put("next_action", it) }
+      })
+    }
+  }
+
+  private fun JSONObject.toProjectProgressPreview(expectedProjectId: String): ProjectProgressPreview {
+    val responseProjectId = getString("project_id")
+    if (responseProjectId != expectedProjectId) {
+      throw ProjectApiException(200, "project_mismatch", "Backend previewed progress for a different Project.")
+    }
+    val patch = optJSONObject("effective_checkpoint_patch")?.let {
+      ProjectProgressCheckpointPatch(
+          currentWork = it.optNullableString("current_work"),
+          blockers = it.optNullableString("blockers"),
+          nextAction = it.optNullableString("next_action"),
+      )
+    }
+    return ProjectProgressPreview(
+        projectId = responseProjectId,
+        idempotencyKey = getString("idempotency_key"),
+        summary = getString("summary"),
+        details = optNullableString("details"),
+        baseProjectRevision = getInt("base_project_revision"),
+        effectiveCheckpointPatch = patch,
+        proposalRequired = getBoolean("proposal_required"),
     )
   }
 
