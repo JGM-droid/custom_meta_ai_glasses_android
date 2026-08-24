@@ -31,6 +31,22 @@ Set via:
 Example:
 - investigation_backend_base_url=http://10.0.2.2:8001
 
+## Test Isolation
+
+The default backend URL above is a real, potentially long-lived backend instance (a developer's
+local `uvicorn api:app`, reachable from the emulator via `10.0.2.2`), not a disposable test
+double. Confirmed live-data pollution in the backend's canonical acceptance Projects ("AC Repair",
+"Room Redesign") traced to this: Investigation dry-run/demo activity and manual exploration ended
+up written into real canonical Project storage rather than an isolated one, alongside disposable
+test-created Projects.
+
+`AppRootTest.kt`'s own Project-mutating tests are already gated behind an explicit
+`-e allow_project_backend_mutation true` instrumentation argument for exactly this reason - do not
+run them (or any other ad-hoc dry-run/demo Investigation call) against a backend instance that also
+hosts real, named acceptance Projects you care about keeping clean. Point instrumented test runs,
+and any interactive dry-run exploration, at a disposable backend instance with its own throwaway
+`PROJECTS_ROOT` instead.
+
 ## Canonical Session Contract Used
 
 Backend authority:
