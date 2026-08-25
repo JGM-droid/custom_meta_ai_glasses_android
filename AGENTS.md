@@ -6,6 +6,24 @@
 
 ## Code style
 
+## Token-Efficient Agent Routing
+
+- Use the minimum number of agents necessary for the task; do not automatically run the full agent team.
+- Small/local bug: `Development + QA` is the default route; add a specialist only when a product, architecture, trust, contract, or persistence decision is material.
+- UX issue: `Product Designer + Development + QA` is the default route; add `Trust UX Reviewer` when AI/approval semantics or user trust are affected.
+- Architecture/Project Memory/persistence issue: one relevant specialist + `Development + QA` is the default route.
+- API/contract issue: the relevant contract specialist + `Development + QA` is the default route.
+- Full multi-agent sweeps are reserved for major milestones and release gates, not routine work.
+- Avoid multiple agents with substantially overlapping responsibilities.
+- Reuse prior validated findings instead of rerunning the same reviews.
+- Read only the files/docs necessary for the current task; avoid broad repo rereads by default.
+- Prefer targeted tests during development; keep full regression for meaningful integration/release gates.
+- Agent reports should be concise and decision-oriented.
+- Prompts should not repeat architecture, constraints, or procedures already defined in `AGENTS.md`, `SKILL.md`, or authoritative repo docs.
+- Orchestrators must follow these efficiency rules too.
+- Token efficiency must never bypass architecture, safety, Project isolation, trust, destructive-action, or human-approval gates.
+- If one agent can safely do the work, use one agent.
+
 ## Quick Reference
 
 | Task | Command |
