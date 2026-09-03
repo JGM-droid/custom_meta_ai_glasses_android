@@ -152,6 +152,46 @@ class ProjectContinuityHudStateTest {
     assertEquals("Review on phone", state.phoneActionLabel())
   }
 
+  /**
+   * Proven physical gap: Capture -> Use leaves evidence captured but no explanation yet
+   * (analysisEligibility.hasEvidence, no glasses-side explanation input - see analysisRow's
+   * doc). Continue on phone from THAT state must land the phone directly on the active
+   * investigation, not a generic Project screen the user then has to navigate away from to find
+   * their own just-captured photos.
+   */
+  @Test
+  fun activeInvestigationHandoffIsOfferedWhenEvidenceExistsWithoutExplanation() {
+    val state = loadedState()
+    state.setAnalysisEligibility(
+        ProjectHudAnalysisEligibility(canAnalyze = false, hasEvidence = true, hasExplanation = false),
+    )
+    val generation = state.renderGeneration
+
+    assertEquals(
+        ProjectHudPhoneHandoff(PROJECT_A, ProjectHudPhoneDestination.ACTIVE_INVESTIGATION),
+        state.phoneHandoff(generation),
+    )
+  }
+
+  /**
+   * ACTIVE_INVESTIGATION takes priority over PROJECT_REVIEW (see phoneHandoff()'s doc): even
+   * with a pending trust review already saved to the canonical Project, evidence captured THIS
+   * sitting with nowhere else to go yet is the more useful phone landing.
+   */
+  @Test
+  fun activeInvestigationHandoffTakesPriorityOverPendingReview() {
+    val state = loadedState(proposalCount = 1)
+    state.setAnalysisEligibility(
+        ProjectHudAnalysisEligibility(canAnalyze = false, hasEvidence = true, hasExplanation = false),
+    )
+    val generation = state.renderGeneration
+
+    assertEquals(
+        ProjectHudPhoneDestination.ACTIVE_INVESTIGATION,
+        state.phoneHandoff(generation)?.destination,
+    )
+  }
+
   @Test
   fun renderedNonReadyStatesHaveWorkingExplicitProjectHandoffs() {
     val loading = ProjectContinuityHudStateMachine()
@@ -443,6 +483,185 @@ class ProjectContinuityHudStateTest {
     assertTrue(state.acceptCapture(state.renderGeneration))
   }
 
+  @Test
+  fun mapOverviewExposesAPendingTrustReviewOnlyWhenUndecided() {
+    val state = ProjectContinuityHudStateMachine()
+    val request = state.selectProject(PROJECT_A, "AC Repair")
+    state.accept(request, overview(PROJECT_A, "AC Repair", trustDecision = null))
+
+    val pending = (state.uiState as ProjectHudUiState.Ready).content.pendingTrustReview
+    assertEquals("session-a", pending?.sessionId)
+    assertEquals("Wiring may be reversed.", pending?.hypothesis)
+    assertEquals("Inspect the terminals.", pending?.recommendedNextAction)
+  }
+
+  @Test
+  fun mapOverviewHasNoPendingTrustReviewOnceADecisionIsRecorded() {
+    val state = ProjectContinuityHudStateMachine()
+    val request = state.selectProject(PROJECT_A, "AC Repair")
+    state.accept(request, overview(PROJECT_A, "AC Repair", trustDecision = "continue"))
+
+    assertNull((state.uiState as ProjectHudUiState.Ready).content.pendingTrustReview)
+  }
+
+  @Test
+  fun analysisEligibilityOnlyTriggersARenderOnAnActualChange() {
+    val state = ProjectContinuityHudStateMachine()
+
+    // Already the all-false default - no-op.
+    assertFalse(state.setAnalysisEligibility(ProjectHudAnalysisEligibility()))
+    val generationBeforeChange = state.renderGeneration
+
+    assertTrue(state.setAnalysisEligibility(ELIGIBLE))
+    assertEquals(ELIGIBLE, state.analysisEligibility)
+    assertTrue(state.renderGeneration > generationBeforeChange)
+
+    // Same value again - no-op.
+    assertFalse(state.setAnalysisEligibility(ELIGIBLE))
+  }
+
+  /**
+   * Stage 1 requirement: evidence with no explanation/context yet must be distinguishable from
+   * both "nothing captured" and "ready to analyze" - this is what lets analysisRow show the
+   * "Continue on your phone to finish analyzing this project." hint instead of silently omitting Analyze. The actual
+   * rendered hint text itself is exercised by the Stage 2 harness (a real Display is needed to
+   * observe rendered content) - this proves the eligibility signal it reads from is correct.
+   */
+  @Test
+  fun evidenceWithoutContextIsDistinctFromNoEvidenceAndFromReadyToAnalyze() {
+    val noEvidence = ProjectHudAnalysisEligibility(canAnalyze = false, hasEvidence = false, hasExplanation = false)
+    val evidenceNoContext = ProjectHudAnalysisEligibility(canAnalyze = false, hasEvidence = true, hasExplanation = false)
+    val evidenceWithContext = ProjectHudAnalysisEligibility(canAnalyze = true, hasEvidence = true, hasExplanation = true)
+
+    assertFalse(noEvidence.hasEvidence)
+    assertTrue(evidenceNoContext.hasEvidence)
+    assertFalse(evidenceNoContext.hasExplanation)
+    assertFalse(evidenceNoContext.canAnalyze)
+    assertTrue(evidenceWithContext.canAnalyze)
+  }
+
+  /** Stage 1 requirement: evidence + context present -> Analyze becomes available. */
+  @Test
+  fun evidenceWithContextMakesAnalyzeAvailable() {
+    val state = loadedState()
+
+    assertTrue(state.setAnalysisEligibility(ELIGIBLE))
+    assertTrue(state.analysisEligibility.canAnalyze)
+    assertTrue(state.acceptAnalyze(state.renderGeneration))
+  }
+
+  @Test
+  fun analyzeIsRejectedWhileNotEligible() {
+    val state = loadedState()
+
+    assertFalse(state.acceptAnalyze(state.renderGeneration))
+    assertEquals(ProjectHudAnalysisStatus.Idle, state.analysisStatus)
+
+    // Evidence alone (no explanation) must still reject the tap - canAnalyze itself is unchanged.
+    state.setAnalysisEligibility(ProjectHudAnalysisEligibility(canAnalyze = false, hasEvidence = true, hasExplanation = false))
+    assertFalse(state.acceptAnalyze(state.renderGeneration))
+  }
+
+  @Test
+  fun analyzeTapMovesToWorkingAndIsDuplicatePressSafe() {
+    val state = loadedState()
+    state.setAnalysisEligibility(ELIGIBLE)
+    val generation = state.renderGeneration
+
+    assertTrue(state.acceptAnalyze(generation))
+    assertEquals(ProjectHudAnalysisStatus.Working, state.analysisStatus)
+    assertFalse(state.acceptAnalyze(generation))
+    assertFalse(state.acceptAnalyze(state.renderGeneration))
+  }
+
+  @Test
+  fun analysisSuccessReturnsToIdle() {
+    val state = loadedState()
+    state.setAnalysisEligibility(ELIGIBLE)
+    state.acceptAnalyze(state.renderGeneration)
+
+    assertTrue(state.analysisSucceeded())
+    assertEquals(ProjectHudAnalysisStatus.Idle, state.analysisStatus)
+  }
+
+  @Test
+  fun analysisFailureIsShownHonestlyAndOnlyClearsOnAnExplicitRetryTap() {
+    val state = loadedState()
+    state.setAnalysisEligibility(ELIGIBLE)
+    state.acceptAnalyze(state.renderGeneration)
+
+    assertTrue(state.analysisFailed("Analysis backend unavailable."))
+    val failed = state.analysisStatus as ProjectHudAnalysisStatus.Failed
+    assertEquals("Analysis backend unavailable.", failed.message)
+    assertEquals(ProjectHudAnalysisStatus.Failed(failed.message), state.analysisStatus)
+
+    state.setAnalysisEligibility(ELIGIBLE)
+    assertTrue(state.acceptAnalyze(state.renderGeneration))
+    assertEquals(ProjectHudAnalysisStatus.Working, state.analysisStatus)
+  }
+
+  @Test
+  fun analysisResultCallbacksAreIgnoredWhenNothingIsWorking() {
+    val state = loadedState()
+
+    assertFalse(state.analysisSucceeded())
+    assertFalse(state.analysisFailed("late error"))
+    assertEquals(ProjectHudAnalysisStatus.Idle, state.analysisStatus)
+  }
+
+  @Test
+  fun trustDecisionTapReturnsTheSessionIdOfThePendingReviewAndIsDuplicatePressSafe() {
+    val state = loadedState() // default fixture has an undecided pending review - see overview()
+    val generation = state.renderGeneration
+
+    assertEquals(
+        "session-a",
+        state.acceptTrustDecision(generation, ProjectHudTrustAction.KEEP_AS_HYPOTHESIS),
+    )
+    assertEquals(ProjectHudAnalysisStatus.Working, state.analysisStatus)
+    // A second trust tap while the first is still Working - whether ADD_EVIDENCE or the same
+    // action again - must not queue a second submission.
+    assertNull(state.acceptTrustDecision(generation, ProjectHudTrustAction.ADD_EVIDENCE))
+  }
+
+  @Test
+  fun trustDecisionTapIsRejectedWhenThereIsNoPendingReviewToDecideOn() {
+    val state = ProjectContinuityHudStateMachine()
+    val request = state.selectProject(PROJECT_A, "AC Repair")
+    // Already decided - mapOverview will not expose a pendingTrustReview for this content.
+    state.accept(request, overview(PROJECT_A, "AC Repair", trustDecision = "continue"))
+
+    assertNull(state.acceptTrustDecision(state.renderGeneration, ProjectHudTrustAction.RETURN))
+  }
+
+  @Test
+  fun selectingAProjectResetsAnalysisEligibilityAndStatus() {
+    val state = loadedState()
+    state.setAnalysisEligibility(ELIGIBLE)
+    state.acceptAnalyze(state.renderGeneration)
+    assertEquals(ProjectHudAnalysisStatus.Working, state.analysisStatus)
+
+    state.selectProject(PROJECT_B, "Room Redesign")
+
+    assertEquals(ProjectHudAnalysisEligibility(), state.analysisEligibility)
+    assertEquals(ProjectHudAnalysisStatus.Idle, state.analysisStatus)
+  }
+
+  @Test
+  fun disconnectingResetsAnalysisStatusButNotEligibility() {
+    val state = loadedState()
+    state.setAnalysisEligibility(ELIGIBLE)
+    state.acceptAnalyze(state.renderGeneration)
+
+    state.disconnected()
+
+    // analysisEligibility is an availability signal from the Investigation ViewModel, not a
+    // request in flight - a dropped glasses connection does not change whether evidence/
+    // explanation exist on the phone, so it is deliberately left alone (see disconnected()'s doc).
+    assertEquals(ELIGIBLE, state.analysisEligibility)
+    assertEquals(ProjectHudAnalysisStatus.Idle, state.analysisStatus)
+  }
+
   private fun loadedState(proposalCount: Int = 0): ProjectContinuityHudStateMachine =
       ProjectContinuityHudStateMachine().also { state ->
         val request = state.selectProject(PROJECT_A, "AC Repair")
@@ -494,5 +713,6 @@ class ProjectContinuityHudStateTest {
   private companion object {
     const val PROJECT_A = "11111111-1111-1111-1111-111111111111"
     const val PROJECT_B = "22222222-2222-2222-2222-222222222222"
+    val ELIGIBLE = ProjectHudAnalysisEligibility(canAnalyze = true, hasEvidence = true, hasExplanation = true)
   }
 }

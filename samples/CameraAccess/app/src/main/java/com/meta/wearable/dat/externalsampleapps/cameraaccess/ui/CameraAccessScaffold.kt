@@ -58,11 +58,15 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.BuildConfig
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudPhoneDestination
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CameraAccessScaffold(
+// internal, not public: matches StreamScreen's own visibility (see StreamScreen.kt) - needed
+// since its onProjectHudPhoneHandoff callback now carries the internal ProjectHudPhoneDestination
+// type. Only ever called from AppRoot.kt in this same module.
+internal fun CameraAccessScaffold(
     viewModel: WearablesViewModel,
     onRequestWearablesPermission: suspend (Permission) -> PermissionStatus,
     modifier: Modifier = Modifier,
@@ -76,7 +80,7 @@ fun CameraAccessScaffold(
     sourceProjectName: String? = null,
     continuationSessionId: String? = null,
     onReturnToSourceProject: (() -> Unit)? = null,
-    onProjectHudPhoneHandoff: ((needsReview: Boolean) -> Unit)? = null,
+    onProjectHudPhoneHandoff: ((destination: ProjectHudPhoneDestination, continuationSessionId: String?) -> Unit)? = null,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val snackbarHostState = remember { SnackbarHostState() }

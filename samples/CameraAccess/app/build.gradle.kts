@@ -67,6 +67,15 @@ android {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
   }
+  testOptions {
+    unitTests {
+      // Standard Android Gradle flag: unmocked android.* calls (e.g. Log.e in
+      // ProjectContinuityHudController's failure paths, now exercised for real by the Stage 2
+      // acceptance harness's FakeDisplay) return a harmless default instead of throwing. No
+      // Robolectric/Mockito-inline added - this is a plain testOptions flag, not a new dependency.
+      isReturnDefaultValues = true
+    }
+  }
   packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
   signingConfigs {
     getByName("debug") {

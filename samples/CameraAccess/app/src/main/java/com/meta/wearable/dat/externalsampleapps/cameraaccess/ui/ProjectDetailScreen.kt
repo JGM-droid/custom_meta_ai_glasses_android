@@ -47,9 +47,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -70,6 +73,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.deriveInvestigationProductState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.hasActiveInvestigation
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.investigationReopenAffordanceLabel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.investigationViewModelKey
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ActiveProjectActionState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailUiState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailViewModel
@@ -93,9 +101,23 @@ fun ProjectDetailScreen(
     project: ProjectSummary,
     onBack: () -> Unit,
     onStartWorking: (ProjectSummary) -> Unit,
-    onResumeInvestigation: (ProjectSummary, String) -> Unit,
+    // Nullable sessionId: the pre-Analyze "Continue on phone -> add context -> Resume on glasses"
+    // handoff (see ContinueInvestigationSection below) has no backend session yet at this point in
+    // the flow - unlike the post-trust-decision "Add evidence" follow-up below, which always has a
+    // real followUpSessionId. Both resolve to the same TopLevelScreen.Capture(project,
+    // continuationSessionId) navigation either way (AppRoot.kt), which already accepts null.
+    onResumeInvestigation: (ProjectSummary, String?) -> Unit,
     onContinueProject: (ProjectSummary) -> Unit,
     focusPendingReview: Boolean = false,
+    // The "Continue on phone" landing for an ACTIVE_INVESTIGATION handoff (see
+    // ProjectContinuityHudState.kt's phoneHandoff()) - proven physical gap: without this, the
+    // phone opened generic Project Detail and the user had to hunt for their own just-captured
+    // photos. See ContinueInvestigationSection below.
+    focusActiveInvestigation: Boolean = false,
+    // The exact continuationSessionId the glasses side (StreamScreen) was already using - reused
+    // so ContinueInvestigationSection resolves the SAME investigationViewModelKey instance. Null
+    // for a fresh, not-yet-submitted investigation, which is the common case for this handoff.
+    investigationContinuationSessionId: String? = null,
     modifier: Modifier = Modifier,
     viewModel: ProjectDetailViewModel =
         viewModel(
@@ -217,6 +239,13 @@ fun ProjectDetailScreen(
           )
         }
 
+        ContinueInvestigationSection(
+            project = project,
+            continuationSessionId = investigationContinuationSessionId,
+            focusActiveInvestigation = focusActiveInvestigation,
+            onResumeOnGlasses = { sessionId -> onResumeInvestigation(project, sessionId) },
+        )
+
         if (overview.pendingProposals.isNotEmpty()) {
           PendingProposalsSection(
               proposals = overview.pendingProposals,
@@ -253,6 +282,111 @@ fun ProjectDetailScreen(
                 ButtonDefaults.outlinedButtonColors(contentColor = AppColor.Accent),
         ) {
           Text("Open Project workspace", fontWeight = FontWeight.SemiBold)
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Option B closed loop's phone-side "add context, then Resume on glasses" landing (see
+ * docs/ROADMAP.md's glasses-native closed loop and AGENTS.md's Continue-on-phone handoff design
+ * decision). Renders only while a LOCAL, pre-Analyze investigation is in progress for this Project
+ * (evidence captured on glasses, not yet submitted) - genuinely absent otherwise, matching this
+ * screen's existing honest-empty-state convention.
+ *
+ * Proven physical gap this closes (second pass): the first version reimplemented a subset of the
+ * investigation UI here (a bare evidence count + explanation field) instead of reusing the SAME
+ * "blue tab" panel StreamScreen already opens on the glasses-Capture screen -
+ * [BackendInvestigationPanel] behind [hasActiveInvestigation]/[investigationReopenAffordanceLabel]
+ * and a [ModalBottomSheet], exactly as StreamScreen.kt's own showInvestigationReopenAffordance ->
+ * showInvestigationPanel() -> ModalBottomSheet { BackendInvestigationPanel(...) } already does.
+ * This is that SAME mechanism, reused unmodified, just hosted on this screen instead - not a new
+ * screen, not a second investigation UI.
+ *
+ * Reuses [InvestigationSessionDebugViewModel] itself, keyed via [investigationViewModelKey] using
+ * [continuationSessionId] - the EXACT value StreamScreen was already using for this Capture entry
+ * (see ProjectDetailScreen's own doc on that param) - not a hardcoded null. This app has no
+ * NavHost, so the Activity's shared ViewModelStore hands back the SAME instance StreamScreen's
+ * HUD-driven Capture/Use already populated, carrying its evidence (in-memory) and explanation
+ * (SavedStateHandle-backed) across the Continue-on-phone/Resume-on-glasses round trip with no new
+ * persistence - whether this is a fresh investigation (null, the common case) or a resumed
+ * follow-up round (a real id, reused rather than dropped).
+ *
+ * [focusActiveInvestigation] (true only for a ProjectHudPhoneDestination.ACTIVE_INVESTIGATION
+ * handoff - see phoneHandoff()'s doc) auto-opens the sheet the moment it has evidence to show -
+ * the proven physical gap: without it, the user had to notice and tap a reopen affordance
+ * themselves instead of landing directly in the panel. `onCaptureAnotherView = null` here (unlike
+ * StreamScreen's own usage) since this phone-only landing has no live glasses stream to capture
+ * another view from - [BackendInvestigationPanel] already hides that specific button when null,
+ * an existing conditional in that same component, not a new special case. "Resume on glasses" is
+ * exactly [onResumeOnGlasses]'s existing Capture(project, continuationSessionId) navigation
+ * (AppRoot.kt) - the same primitive the post-trust-decision "Add evidence" follow-up already uses
+ * below - added here specifically because BackendInvestigationPanel itself has no notion of
+ * "glasses" to resume to.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ContinueInvestigationSection(
+    project: ProjectSummary,
+    continuationSessionId: String?,
+    focusActiveInvestigation: Boolean,
+    onResumeOnGlasses: (String?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+  val application = LocalContext.current.applicationContext as Application
+  val investigationViewModel: InvestigationSessionDebugViewModel =
+      viewModel(
+          key = investigationViewModelKey(project.projectId, continuationSessionId),
+          factory =
+              InvestigationSessionDebugViewModel.factory(
+                  application = application,
+                  sourceProjectId = project.projectId,
+                  initialContinuationSessionId = continuationSessionId,
+              ),
+      )
+  val investigationUiState by investigationViewModel.uiState.collectAsState()
+  if (!hasActiveInvestigation(investigationUiState)) return
+
+  var isPanelVisible by remember { mutableStateOf(false) }
+  LaunchedEffect(focusActiveInvestigation) {
+    if (focusActiveInvestigation) isPanelVisible = true
+  }
+
+  OutlinedButton(
+      onClick = { isPanelVisible = true },
+      modifier = modifier.fillMaxWidth().padding(top = 24.dp),
+      shape = RoundedCornerShape(16.dp),
+      colors = ButtonDefaults.outlinedButtonColors(contentColor = AppColor.Accent),
+  ) {
+    Text(investigationReopenAffordanceLabel(investigationUiState), fontWeight = FontWeight.SemiBold)
+  }
+
+  if (isPanelVisible) {
+    ModalBottomSheet(
+        onDismissRequest = { isPanelVisible = false },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+      Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+        BackendInvestigationPanel(
+            modifier = Modifier.fillMaxWidth(),
+            viewModel = investigationViewModel,
+            sourceProjectName = project.name,
+            onCaptureAnotherView = null,
+        )
+        val productState = remember(investigationUiState) { deriveInvestigationProductState(investigationUiState) }
+        if (productState.canAnalyze) {
+          Button(
+              onClick = {
+                isPanelVisible = false
+                onResumeOnGlasses(investigationUiState.continuationSessionId)
+              },
+              modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 16.dp),
+              shape = RoundedCornerShape(16.dp),
+              colors = ButtonDefaults.buttonColors(containerColor = AppColor.Accent, contentColor = AppColor.AccentInk),
+          ) {
+            Text("Resume on glasses", fontWeight = FontWeight.SemiBold)
+          }
         }
       }
     }

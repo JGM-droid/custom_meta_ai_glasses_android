@@ -44,7 +44,10 @@ import com.meta.wearable.dat.core.session.DeviceSession
 import com.meta.wearable.dat.core.session.DeviceSessionState
 import com.meta.wearable.dat.core.types.DeviceSessionError
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectContinuityHudController
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudAnalysisEligibility
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudPhoneHandoff
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudTrustAction
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.BackendTrustDecision
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceInput
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationEvidenceSource
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.bitmapToInvestigationEvidence
@@ -64,6 +67,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** A HUD-requested trust decision, staged for StreamScreen - see StreamViewModel's doc. */
+internal data class HudTrustDecisionRequest(val action: ProjectHudTrustAction, val sessionId: String)
 
 @SuppressLint("AutoCloseableUse")
 internal class StreamViewModel(
@@ -101,6 +107,15 @@ internal class StreamViewModel(
   private val _hudCaptureAcceptRequest = MutableStateFlow<InvestigationEvidenceInput?>(null)
   val hudCaptureAcceptRequest: StateFlow<InvestigationEvidenceInput?> =
       _hudCaptureAcceptRequest.asStateFlow()
+  // Bumped (never read for its value) to signal "run Analyze now" to StreamScreen - see
+  // onHudAnalyzeRequested(). A counter rather than a plain Unit/Boolean event so two Analyze taps
+  // in a row (e.g. retry after Failed) are always two distinct LaunchedEffect keys, even though
+  // the HUD's own duplicate-press guard makes that the only way a second one is ever requested.
+  private val _hudAnalyzeTrigger = MutableStateFlow(0L)
+  val hudAnalyzeTrigger: StateFlow<Long> = _hudAnalyzeTrigger.asStateFlow()
+  private val _hudTrustDecisionRequest = MutableStateFlow<HudTrustDecisionRequest?>(null)
+  val hudTrustDecisionRequest: StateFlow<HudTrustDecisionRequest?> =
+      _hudTrustDecisionRequest.asStateFlow()
   private val projectHudController =
       ProjectContinuityHudController(
           scope = viewModelScope,
@@ -110,6 +125,8 @@ internal class StreamViewModel(
           onCaptureRequested = { onHudCaptureRequested() },
           onUseRequested = { onHudUseRequested() },
           onRetakeRequested = { onHudRetakeRequested() },
+          onAnalyzeRequested = { onHudAnalyzeRequested() },
+          onTrustDecisionRequested = { action, sessionId -> onHudTrustDecisionRequested(action, sessionId) },
       )
   private var projectHudProjectId: String? = null
 
@@ -455,7 +472,7 @@ internal class StreamViewModel(
   /**
    * Called by StreamScreen once it has attempted to append [hudCaptureAcceptRequest]'s evidence
    * via the Investigation ViewModel's own live-evidence-append call - the only local mutation Use
-   * performs (no backend upload; the eventual submitInvestigation() batch call is unchanged).
+   * performs (no backend upload; the eventual Analyze batch submission remains unchanged).
    * [appended] is that call's own return value: false only in the rare case capacity filled
    * between capture and Use, never from a network condition.
    */
@@ -488,6 +505,57 @@ internal class StreamViewModel(
           capturedPhoto = null,
           isShareDialogVisible = false,
       )
+    }
+  }
+
+  /**
+   * Pushed from StreamScreen whenever the Investigation ViewModel's own eligibility signal
+   * changes - see [ProjectHudAnalysisEligibility]'s doc and
+   * investigation.deriveInvestigationProductState (reused as-is; never duplicated here) - so the
+   * HUD can offer, hide, or explain Analyze without owning any Investigation state itself.
+   */
+  fun updateHudAnalysisEligibility(eligibility: ProjectHudAnalysisEligibility) {
+    projectHudController.onAnalysisEligibilityChanged(eligibility)
+  }
+
+  /**
+   * Fired by [projectHudController] when the user taps Analyze. This class never runs the
+   * analysis itself - it only bumps [hudAnalyzeTrigger], which StreamScreen (the one place this
+   * ViewModel and InvestigationSessionDebugViewModel are both in scope) observes to actually call
+   * the existing Analyze submission call, then reports the outcome back via
+   * [onHudAnalyzeCompleted]. The concise result itself never flows through this bridge - it
+   * arrives through the canonical Project refresh [ProjectContinuityHudController] performs on
+   * success, exactly like every other HUD screen already reads from that same source.
+   */
+  private fun onHudAnalyzeRequested() {
+    _hudAnalyzeTrigger.value += 1
+  }
+
+  /** Called by StreamScreen once the HUD-triggered Analyze this ViewModel requested has settled. */
+  fun onHudAnalyzeCompleted(success: Boolean, message: String?) {
+    if (success) {
+      projectHudController.onAnalysisSucceeded()
+    } else {
+      projectHudController.onAnalysisFailed(message ?: "Analyze failed.")
+    }
+  }
+
+  /**
+   * Fired by [projectHudController] when the user taps one of the three required trust actions.
+   * Stages the request for StreamScreen to submit via the existing trust-decision call - see
+   * [HudTrustDecisionRequest] and [onHudTrustDecisionCompleted].
+   */
+  private fun onHudTrustDecisionRequested(action: ProjectHudTrustAction, sessionId: String) {
+    _hudTrustDecisionRequest.value = HudTrustDecisionRequest(action, sessionId)
+  }
+
+  /** Called by StreamScreen once the HUD-requested trust decision this ViewModel staged has settled. */
+  fun onHudTrustDecisionCompleted(success: Boolean, message: String?) {
+    _hudTrustDecisionRequest.value = null
+    if (success) {
+      projectHudController.onAnalysisSucceeded()
+    } else {
+      projectHudController.onAnalysisFailed(message ?: "Trust decision failed.")
     }
   }
 

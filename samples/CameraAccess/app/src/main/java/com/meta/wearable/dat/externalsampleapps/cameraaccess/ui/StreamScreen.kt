@@ -54,11 +54,17 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.meta.wearable.dat.camera.types.StreamState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudAnalysisEligibility
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudPhoneDestination
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudTrustAction
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.R
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.BackendTrustDecision
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationClientState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.deriveInvestigationProductState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.hasActiveInvestigation
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.investigationReopenAffordanceLabel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.investigationViewModelKey
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 
@@ -73,7 +79,13 @@ internal fun StreamScreen(
     sourceProjectName: String? = null,
     continuationSessionId: String? = null,
     onReturnToSourceProject: (() -> Unit)? = null,
-    onProjectHudPhoneHandoff: ((needsReview: Boolean) -> Unit)? = null,
+    // continuationSessionId carried alongside destination is exactly this composable's OWN
+    // continuationSessionId param (see LaunchedEffect(projectHudPhoneHandoff) below) - the ProjectHudPhoneHandoff
+    // itself only ever knows a bare Project id (ProjectContinuityHudController never sees the
+    // Investigation ViewModel's session state - see class doc), so the caller re-attaches
+    // whatever continuation this exact Capture entry was already using, letting the phone side
+    // resolve the SAME investigationViewModelKey instance instead of a fresh, empty one.
+    onProjectHudPhoneHandoff: ((destination: ProjectHudPhoneDestination, continuationSessionId: String?) -> Unit)? = null,
     streamViewModel: StreamViewModel =
         viewModel(
             factory =
@@ -90,7 +102,7 @@ internal fun StreamScreen(
             // sourceProjectId. Without this, Compose's default class-name-only key would let one
             // Capture session's Project attribution leak into the next (the same class of bug
             // already found and fixed for NewProjectViewModel in an earlier slice).
-            key = "${sourceProjectId ?: "unscoped"}:${continuationSessionId.orEmpty()}",
+            key = investigationViewModelKey(sourceProjectId, continuationSessionId),
             factory =
                 InvestigationSessionDebugViewModel.factory(
                     application = (LocalActivity.current as ComponentActivity).application,
@@ -102,7 +114,19 @@ internal fun StreamScreen(
   val streamUiState by streamViewModel.uiState.collectAsStateWithLifecycle()
   val projectHudPhoneHandoff by streamViewModel.projectHudPhoneHandoff.collectAsStateWithLifecycle()
   val hudCaptureAcceptRequest by streamViewModel.hudCaptureAcceptRequest.collectAsStateWithLifecycle()
+  val hudAnalyzeTrigger by streamViewModel.hudAnalyzeTrigger.collectAsStateWithLifecycle()
+  val hudTrustDecisionRequest by streamViewModel.hudTrustDecisionRequest.collectAsStateWithLifecycle()
   val investigationUiState by investigationViewModel.uiState.collectAsStateWithLifecycle()
+  // hasEvidence/hasExplanation exist only so the HUD can explain a false canAnalyze instead of
+  // silently omitting Analyze - see ProjectHudAnalysisEligibility's doc.
+  val hudAnalysisEligibility = remember(investigationUiState) {
+    val productState = deriveInvestigationProductState(investigationUiState)
+    ProjectHudAnalysisEligibility(
+        canAnalyze = productState.canAnalyze,
+        hasEvidence = productState.capturedViewCount > 0,
+        hasExplanation = productState.hasExplanation,
+    )
+  }
   val showInvestigationReopenAffordance =
       remember(streamUiState.isInvestigationPanelVisible, streamUiState.isShareDialogVisible, investigationUiState) {
         !streamUiState.isInvestigationPanelVisible &&
@@ -133,9 +157,7 @@ internal fun StreamScreen(
       // Defense in depth: an event from an old Project can never navigate the current Project.
       if (handoff.projectId == sourceProjectId) {
         streamViewModel.stopStream()
-        onProjectHudPhoneHandoff?.invoke(
-            handoff.destination == ProjectHudPhoneDestination.PROJECT_REVIEW
-        )
+        onProjectHudPhoneHandoff?.invoke(handoff.destination, continuationSessionId)
       }
       streamViewModel.consumeProjectHudPhoneHandoff(handoff)
     }
@@ -149,6 +171,43 @@ internal fun StreamScreen(
     hudCaptureAcceptRequest?.let { evidence ->
       val appended = investigationViewModel.appendLiveEvidence(evidence)
       streamViewModel.onHudCaptureAccepted(appended)
+    }
+  }
+
+  LaunchedEffect(hudAnalysisEligibility) { streamViewModel.updateHudAnalysisEligibility(hudAnalysisEligibility) }
+
+  LaunchedEffect(hudAnalyzeTrigger) {
+    // 0 is the initial value, never a real request - see StreamViewModel's doc on
+    // onHudAnalyzeRequested. submitInvestigation() reuses the exact same existing Analyze call the
+    // phone panel's "Analyze investigation" button already makes; join() waits for THIS run's Job
+    // specifically, so the result read afterward can never be a stale prior run's.
+    if (hudAnalyzeTrigger == 0L) return@LaunchedEffect
+    investigationViewModel.submitInvestigation()?.join()
+    val finalState = investigationViewModel.uiState.value
+    streamViewModel.onHudAnalyzeCompleted(
+        success = finalState.clientState == InvestigationClientState.COMPLETED,
+        message = finalState.statusMessage,
+    )
+  }
+
+  LaunchedEffect(hudTrustDecisionRequest) {
+    // Reuses the exact same existing submitTrustDecision() the phone panel's trust buttons call,
+    // just with an explicit session_id (the one the HUD's pending review is actually about - see
+    // InvestigationSessionDebugViewModel's doc on that parameter) instead of implicitly trusting
+    // whatever session this ViewModel's own uiState currently happens to hold.
+    hudTrustDecisionRequest?.let { request ->
+      val decision =
+          when (request.action) {
+            ProjectHudTrustAction.KEEP_AS_HYPOTHESIS -> BackendTrustDecision.CONTINUE
+            ProjectHudTrustAction.ADD_EVIDENCE -> BackendTrustDecision.MORE_EVIDENCE
+            ProjectHudTrustAction.RETURN -> BackendTrustDecision.DISAGREE
+          }
+      investigationViewModel.submitTrustDecision(decision, request.sessionId)?.join()
+      val finalState = investigationViewModel.uiState.value
+      streamViewModel.onHudTrustDecisionCompleted(
+          success = !finalState.trustDecisionInFlight && finalState.backendErrorCategory == null,
+          message = finalState.trustMessage,
+      )
     }
   }
 

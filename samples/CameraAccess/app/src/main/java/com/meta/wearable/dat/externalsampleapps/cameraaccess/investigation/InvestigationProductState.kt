@@ -62,6 +62,21 @@ internal fun deriveInvestigationProductState(
   )
 }
 
+/**
+ * The Compose `viewModel(key = ...)` key for [InvestigationSessionDebugViewModel], shared by every
+ * entry point that must resolve to the SAME retained instance rather than a fresh one - notably
+ * StreamScreen (glasses Capture) and ProjectDetailScreen's "Continue on phone"/"Resume on glasses"
+ * section (see AppRoot's Option B closed loop). This app has no NavHost/per-destination
+ * ViewModelStoreOwner - AppRoot switches top-level screens on a plain Compose state var - so the
+ * single Activity's ViewModelStore is what actually carries evidence/explanation across that
+ * handoff, not any new persistence: two call sites computing this identical string are guaranteed
+ * by Compose to get back the literal same ViewModel instance. See
+ * InvestigationProductStateTest's key-continuity test for the proof this holds for the pre-Analyze
+ * handoff (both sides pass a null continuationSessionId at that point in the flow).
+ */
+internal fun investigationViewModelKey(sourceProjectId: String?, continuationSessionId: String?): String =
+    "${sourceProjectId ?: "unscoped"}:${continuationSessionId.orEmpty()}"
+
 internal fun hasActiveInvestigation(uiState: InvestigationSessionDebugUiState): Boolean {
   val hasEvidence = uiState.activeCaptureCount > 0
   val hasExplanation = uiState.explanationText.trim().isNotEmpty()

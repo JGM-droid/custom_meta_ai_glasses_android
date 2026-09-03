@@ -205,11 +205,21 @@ internal class InvestigationSessionDebugViewModel(
     _uiState.update { it.copy(trustCorrectionText = text) }
   }
 
-  fun submitTrustDecision(decision: BackendTrustDecision) {
-    val projectId = sourceProjectId ?: return
-    val sessionId = _uiState.value.sessionId ?: return
+  /**
+   * @param sessionId Defaults to whatever session this ViewModel's own [uiState] already has
+   *   loaded (the phone panel's existing behavior, unchanged). The HUD's trust-decision bridge
+   *   (see StreamViewModel's onHudTrustDecisionRequested) passes it explicitly instead, since the
+   *   session a HUD decision is about is the one a same-sitting HUD-triggered Analyze just
+   *   populated into this exact field - not a second, parallel notion of "current session."
+   * @return the Job driving this submission, so a caller needing completion (the HUD bridge) can
+   *   `join()` it. Null when nothing was started - see [submitInvestigation]'s doc for the same
+   *   shape and reasoning.
+   */
+  fun submitTrustDecision(decision: BackendTrustDecision, sessionId: String? = null): Job? {
+    val projectId = sourceProjectId ?: return null
+    val resolvedSessionId = sessionId ?: _uiState.value.sessionId ?: return null
     if (_uiState.value.compactResult == null || activeJob?.isActive == true) {
-      return
+      return activeJob
     }
     activeJob =
         viewModelScope.launch {
@@ -225,7 +235,7 @@ internal class InvestigationSessionDebugViewModel(
                 withContext(Dispatchers.IO) {
                   repository.submitTrustDecision(
                       projectId = projectId,
-                      sessionId = sessionId,
+                      sessionId = resolvedSessionId,
                       decision = decision,
                       correction = _uiState.value.trustCorrectionText,
                   )
@@ -284,6 +294,7 @@ internal class InvestigationSessionDebugViewModel(
             activeJob = null
           }
         }
+    return activeJob
   }
 
   fun setImage(slotIndex: Int, uriString: String?, displayName: String?) {
@@ -464,14 +475,22 @@ internal class InvestigationSessionDebugViewModel(
     }
   }
 
-  fun submitInvestigation() {
+  /**
+   * @return the Job driving this submission, so a caller that needs to know when it's actually
+   *   done (e.g. the HUD's Analyze bridge in StreamScreen.kt - see StreamViewModel's doc on
+   *   onHudAnalyzeRequested) can `join()` it rather than polling [uiState]. Null when nothing was
+   *   started: either a submission is already active (returns that job instead - joining it waits
+   *   for the SAME work already in flight, which is correct) or backend URL validation failed
+   *   before any job existed.
+   */
+  fun submitInvestigation(): Job? {
     if (activeJob?.isActive == true) {
-      return
+      return activeJob
     }
     val backendUrlValidation =
         InvestigationBackendConfig.validateSubmissionBaseUrl(_uiState.value.backendBaseUrl)
     if (applyBackendUrlValidationFailure(backendUrlValidation)) {
-      return
+      return null
     }
     activeJob = viewModelScope.launch {
       try {
@@ -613,6 +632,7 @@ internal class InvestigationSessionDebugViewModel(
         activeJob = null
       }
     }
+    return activeJob
   }
 
   fun cancelSubmission() {

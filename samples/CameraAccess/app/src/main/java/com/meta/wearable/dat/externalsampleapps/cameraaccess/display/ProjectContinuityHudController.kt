@@ -52,6 +52,17 @@ internal class ProjectContinuityHudController(
     // Fired when the user taps Retake on a pending captured photo. Purely a discard signal so the
     // owner can drop its held photo/preview state - it cannot fail, so there is no result callback.
     private val onRetakeRequested: () -> Unit,
+    // Fired when the user taps Analyze. This class never calls the Analyze API itself (see class
+    // doc) - the owner runs the existing Investigation analysis and reports the outcome back via
+    // onAnalysisSucceeded/onAnalysisFailed. The result content itself is never pushed back through
+    // this callback pair - it arrives through the canonical Project refresh onAnalysisSucceeded
+    // triggers, the same single source of truth every other HUD screen already reads from.
+    private val onAnalyzeRequested: () -> Unit,
+    // Fired when the user taps one of the three required trust actions (Keep as hypothesis / Add
+    // evidence / Return) against the session_id of the pending review currently shown. This class
+    // never submits the trust decision itself - the owner does, through the existing Investigation
+    // trust-decision capability, and reports back via onAnalysisSucceeded/onAnalysisFailed.
+    private val onTrustDecisionRequested: (ProjectHudTrustAction, sessionId: String) -> Unit,
 ) {
   private companion object {
     private const val TAG = "CameraAccess:ProjectHUD"
@@ -61,7 +72,11 @@ internal class ProjectContinuityHudController(
   }
 
   private val lock = Any()
-  private val stateMachine = ProjectContinuityHudStateMachine()
+  // internal, not private: the sole seam the Stage 2 acceptance harness (see
+  // display/ProjectContinuityHudTestHarness.kt under src/test) uses to read the real state
+  // machine's outcome after driving this controller through fake Display/dispatch events - never
+  // duplicated, never re-derived, the exact same instance production rendering reads from.
+  internal val stateMachine = ProjectContinuityHudStateMachine()
   private val attaching = AtomicBoolean(false)
   private var session: DeviceSession? = null
   private var display: Display? = null
@@ -84,25 +99,8 @@ internal class ProjectContinuityHudController(
     if (!attaching.compareAndSet(false, true)) return
     session.addDisplay().fold(
         onSuccess = { attached ->
-          synchronized(lock) {
-            display = attached
-            displayReady = false
-          }
           attaching.set(false)
-          displayStateJob?.cancel()
-          displayStateJob =
-              scope.launch {
-                attached.state.collect { state ->
-                  synchronized(lock) { displayReady = state == DisplayState.STARTED }
-                  when (state) {
-                    DisplayState.STARTED -> render()
-                    DisplayState.STOPPED -> {
-                      synchronized(lock) { stateMachine.disconnected() }
-                    }
-                    else -> Unit
-                  }
-                }
-              }
+          attachDisplay(attached)
         },
         onFailure = { error, _ ->
           attaching.set(false)
@@ -112,6 +110,37 @@ internal class ProjectContinuityHudController(
         },
     )
   }
+
+  private fun attachDisplay(attached: Display) {
+    synchronized(lock) {
+      display = attached
+      displayReady = false
+    }
+    displayStateJob?.cancel()
+    displayStateJob =
+        scope.launch {
+          attached.state.collect { state ->
+            synchronized(lock) { displayReady = state == DisplayState.STARTED }
+            when (state) {
+              DisplayState.STARTED -> render()
+              DisplayState.STOPPED -> {
+                synchronized(lock) { stateMachine.disconnected() }
+              }
+              else -> Unit
+            }
+          }
+        }
+  }
+
+  /**
+   * Test-only seam: attaches an already-obtained [Display] directly, bypassing the real
+   * real session-based SDK call [attachTo] makes. DeviceSession is a concrete, final SDK class
+   * with an internal-only constructor - it cannot be constructed or faked outside a real device
+   * connection - so this is how the Stage 2 acceptance harness drives this controller's real
+   * Display-handling logic against a fake Display. [attachDisplay] is the exact same private
+   * function [attachTo]'s onSuccess branch calls in production; nothing here is duplicated.
+   */
+  internal fun attachDisplayForTesting(display: Display) = attachDisplay(display)
 
   fun onSessionPaused() {
     synchronized(lock) { stateMachine.disconnected() }
@@ -198,6 +227,8 @@ internal class ProjectContinuityHudController(
     val generation: Long
     val phoneActionLabel: String
     val captureStatus: ProjectHudCaptureStatus
+    val analysisEligibility: ProjectHudAnalysisEligibility
+    val analysisStatus: ProjectHudAnalysisStatus
     synchronized(lock) {
       if (!displayReady) return false
       targetDisplay = display ?: return false
@@ -205,9 +236,11 @@ internal class ProjectContinuityHudController(
       generation = stateMachine.renderGeneration
       phoneActionLabel = stateMachine.phoneActionLabel()
       captureStatus = stateMachine.captureStatus
+      analysisEligibility = stateMachine.analysisEligibility
+      analysisStatus = stateMachine.analysisStatus
     }
     var succeeded = true
-    targetDisplay.sendContent { renderState(state, generation, phoneActionLabel, captureStatus) }.onFailure { error, _ ->
+    targetDisplay.sendContent { renderState(state, generation, phoneActionLabel, captureStatus, analysisEligibility, analysisStatus) }.onFailure { error, _ ->
       succeeded = false
       Log.e(TAG, "Could not render Project HUD: ${error.description}")
     }
@@ -219,12 +252,23 @@ internal class ProjectContinuityHudController(
       generation: Long,
       phoneActionLabel: String,
       captureStatus: ProjectHudCaptureStatus,
+      analysisEligibility: ProjectHudAnalysisEligibility,
+      analysisStatus: ProjectHudAnalysisStatus,
   ) {
     // Awaiting a Use/Retake decision takes over the whole HUD rather than being folded into the
     // normal per-state screens below - it is a decision point, not routine Project content, and
     // keeping Use/Retake as the only two options on-screen avoids a mistap on a small HUD.
     if (captureStatus is ProjectHudCaptureStatus.AwaitingConfirmation) {
       captureConfirmationScreen(state.projectName, generation)
+      return
+    }
+    // Same reasoning for an analysis result awaiting a trust decision - it is the OTHER decision
+    // point this HUD can be in, so it takes over the whole screen the same way. Capture always
+    // wins if somehow both are true at once (defense only - dispatchTrustDecision/dispatchAnalyze
+    // cannot fire while a photo confirmation is showing, since that is a different screen).
+    val pendingTrustReview = (state as? ProjectHudUiState.Ready)?.content?.pendingTrustReview
+    if (pendingTrustReview != null) {
+      trustReviewScreen(state.projectName, pendingTrustReview, analysisStatus, generation)
       return
     }
     when (state) {
@@ -240,13 +284,14 @@ internal class ProjectContinuityHudController(
             text(short(state.message), style = TextStyle.BODY)
             text("Showing the last loaded summary until refresh completes.", style = TextStyle.META)
             captureRow(captureStatus, generation)
+            analysisRow(analysisEligibility, analysisStatus, generation, hasPriorSuggestion = state.content.latestGuidance != null)
             button("Refresh", onClick = { dispatchRefresh(generation) })
             button(phoneActionLabel, onClick = { dispatchPhone(generation) })
           }
       is ProjectHudUiState.Ready -> {
-        if (state.content.isEmpty) emptyScreen(state.content, generation, phoneActionLabel, captureStatus)
-        else if (state.destination == ProjectHudDestination.DETAILS) details(state.content, generation, phoneActionLabel, captureStatus)
-        else overview(state.content, generation, phoneActionLabel, captureStatus)
+        if (state.content.isEmpty) emptyScreen(state.content, generation, phoneActionLabel, captureStatus, analysisEligibility, analysisStatus)
+        else if (state.destination == ProjectHudDestination.DETAILS) details(state.content, generation, phoneActionLabel, captureStatus, analysisEligibility, analysisStatus)
+        else overview(state.content, generation, phoneActionLabel, captureStatus, analysisEligibility, analysisStatus)
       }
     }
   }
@@ -262,7 +307,7 @@ internal class ProjectContinuityHudController(
     when (status) {
       is ProjectHudCaptureStatus.Capturing -> text("CAPTURING…", style = TextStyle.META, color = TextColor.SECONDARY)
       is ProjectHudCaptureStatus.Failed -> {
-        text(short("Capture failed: ${status.message}"), style = TextStyle.META, color = TextColor.SECONDARY)
+        text(short("Couldn't capture that photo: ${status.message}"), style = TextStyle.META, color = TextColor.SECONDARY)
         button("Capture", onClick = { dispatchCapture(generation) })
       }
       ProjectHudCaptureStatus.Idle -> button("Capture", onClick = { dispatchCapture(generation) })
@@ -279,6 +324,92 @@ internal class ProjectContinuityHudController(
       text("Photo captured — use this image?", style = TextStyle.BODY)
       button("Use", onClick = { dispatchUse(generation) })
       button("Retake", style = ButtonStyle.SECONDARY, onClick = { dispatchRetake(generation) })
+    }
+  }
+
+  /**
+   * Offers Analyze on the normal per-state screens, before any [ProjectHudPendingTrustReview]
+   * exists - see renderState()'s precedence doc for the other half of this lifecycle
+   * ([trustReviewScreen], once one does). Fully absent only when there is genuinely nothing to
+   * analyze yet (no captured evidence) - matching [captureRow]'s own show-nothing convention.
+   *
+   * When evidence exists but Analyze still is not offered, this explains why instead of silently
+   * omitting it - the proven gap where a HUD Capture -> Use just added evidence, but explanation
+   * has no glasses-side input surface (only the phone's existing Investigation panel does). The
+   * hint sits next to the phoneActionLabel button every one of these screens already offers, so it
+   * points at an action already on screen rather than adding a second phone-handoff path.
+   *
+   * [hasPriorSuggestion] (this Project's [ProjectHudContent.latestGuidance] being non-null, the
+   * same existing signal [details] already reads) chooses the button's wording via
+   * [analyzeButtonLabel] - a bare "Analyze" reads as a first, one-time action, but once a prior AI
+   * suggestion exists this button really means re-analyzing with whatever evidence has been added
+   * since. No new state: this reuses a field the canonical Project overview already provides.
+   */
+  private fun FlexBoxScope.analysisRow(
+      eligibility: ProjectHudAnalysisEligibility,
+      status: ProjectHudAnalysisStatus,
+      generation: Long,
+      hasPriorSuggestion: Boolean,
+  ) {
+    when (status) {
+      ProjectHudAnalysisStatus.Working -> text("ANALYZING…", style = TextStyle.META, color = TextColor.SECONDARY)
+      is ProjectHudAnalysisStatus.Failed -> {
+        text(short("Analyze failed: ${status.message}"), style = TextStyle.META, color = TextColor.SECONDARY)
+        if (eligibility.canAnalyze) button(analyzeButtonLabel(hasPriorSuggestion), onClick = { dispatchAnalyze(generation) })
+      }
+      ProjectHudAnalysisStatus.Idle ->
+          if (eligibility.canAnalyze) {
+            button(analyzeButtonLabel(hasPriorSuggestion), onClick = { dispatchAnalyze(generation) })
+          } else if (eligibility.hasEvidence && !eligibility.hasExplanation) {
+            text("Continue on your phone to finish analyzing this project.", style = TextStyle.META, color = TextColor.SECONDARY)
+          }
+    }
+  }
+
+  /**
+   * Smallest state-appropriate Analyze wording (see [analysisRow]'s doc): a fresh Project with no
+   * prior AI suggestion gets a plain first-time label; once a suggestion already exists, tapping
+   * this again really means re-analyzing with whatever evidence has changed since, so it says so
+   * rather than repeating the same generic "Analyze".
+   */
+  private fun analyzeButtonLabel(hasPriorSuggestion: Boolean): String =
+      if (hasPriorSuggestion) "Update suggestion" else "Analyze project"
+
+  /**
+   * The trust-decision screen for a completed analysis awaiting one of the three required
+   * actions - see renderState()'s precedence doc. [status] here means something different than in
+   * [analysisRow]: Working is this trust decision being submitted, and Failed is that submission
+   * failing (still shows the three actions again, ready for a fresh explicit tap - never retried
+   * automatically). The hypothesis is labeled clearly unconfirmed AI output, never canonical
+   * Project truth, matching the same honesty convention
+   * [ProjectContinuityHudStateMachine.mapOverview] already uses for latestGuidance - only the
+   * wording here is friendlier, not the distinction itself. The three button labels below
+   * (KEEP_AS_HYPOTHESIS/ADD_EVIDENCE/RETURN) are human-facing rewording only - see
+   * [ProjectHudTrustAction]'s doc: the enum names, dispatch routing, and backend
+   * BackendTrustDecision mapping are all unchanged.
+   */
+  private fun ContentScope.trustReviewScreen(
+      projectName: String,
+      pending: ProjectHudPendingTrustReview,
+      status: ProjectHudAnalysisStatus,
+      generation: Long,
+  ) {
+    flexBox(direction = Direction.COLUMN, gap = 10) {
+      text(short(projectName), style = TextStyle.HEADING)
+      text("THE AI'S IDEA — NOT CONFIRMED YET", style = TextStyle.META, color = TextColor.SECONDARY)
+      text(short(pending.hypothesis), style = TextStyle.BODY)
+      text("SUGGESTED NEXT STEP", style = TextStyle.META, color = TextColor.SECONDARY)
+      text(short(pending.recommendedNextAction), style = TextStyle.BODY)
+      if (status is ProjectHudAnalysisStatus.Failed) {
+        text(short("Failed: ${status.message}"), style = TextStyle.META, color = TextColor.SECONDARY)
+      }
+      if (status is ProjectHudAnalysisStatus.Working) {
+        text("SUBMITTING…", style = TextStyle.META, color = TextColor.SECONDARY)
+      } else {
+        button("Looks right", onClick = { dispatchTrustDecision(generation, ProjectHudTrustAction.KEEP_AS_HYPOTHESIS) })
+        button("Add more info", onClick = { dispatchTrustDecision(generation, ProjectHudTrustAction.ADD_EVIDENCE) })
+        button("Go back", style = ButtonStyle.SECONDARY, onClick = { dispatchTrustDecision(generation, ProjectHudTrustAction.RETURN) })
+      }
     }
   }
 
@@ -301,6 +432,8 @@ internal class ProjectContinuityHudController(
       generation: Long,
       phoneActionLabel: String,
       captureStatus: ProjectHudCaptureStatus,
+      analysisEligibility: ProjectHudAnalysisEligibility,
+      analysisStatus: ProjectHudAnalysisStatus,
   ) {
     flexBox(direction = Direction.COLUMN, gap = 10) {
       text(short(content.projectName), style = TextStyle.HEADING)
@@ -308,6 +441,7 @@ internal class ProjectContinuityHudController(
       text("Nothing has been recorded yet.", style = TextStyle.BODY)
       text("Choose what you want to work on next from your phone.", style = TextStyle.BODY)
       captureRow(captureStatus, generation)
+      analysisRow(analysisEligibility, analysisStatus, generation, hasPriorSuggestion = content.latestGuidance != null)
       button(phoneActionLabel, onClick = { dispatchPhone(generation) })
       button("Refresh", style = ButtonStyle.SECONDARY, onClick = { dispatchRefresh(generation) })
     }
@@ -318,6 +452,8 @@ internal class ProjectContinuityHudController(
       generation: Long,
       phoneActionLabel: String,
       captureStatus: ProjectHudCaptureStatus,
+      analysisEligibility: ProjectHudAnalysisEligibility,
+      analysisStatus: ProjectHudAnalysisStatus,
   ) {
     flexBox(direction = Direction.COLUMN, gap = 10) {
       text(short(content.projectName), style = TextStyle.HEADING)
@@ -332,6 +468,7 @@ internal class ProjectContinuityHudController(
         }
       }
       captureRow(captureStatus, generation)
+      analysisRow(analysisEligibility, analysisStatus, generation, hasPriorSuggestion = content.latestGuidance != null)
       if (content.hasAdditionalDetails) {
         button("Show details", onClick = { dispatchDetails(generation) })
       }
@@ -345,6 +482,8 @@ internal class ProjectContinuityHudController(
       generation: Long,
       phoneActionLabel: String,
       captureStatus: ProjectHudCaptureStatus,
+      analysisEligibility: ProjectHudAnalysisEligibility,
+      analysisStatus: ProjectHudAnalysisStatus,
   ) {
     flexBox(direction = Direction.COLUMN, gap = 10) {
       text(short(content.projectName), style = TextStyle.HEADING)
@@ -365,33 +504,39 @@ internal class ProjectContinuityHudController(
         text(short(it), style = TextStyle.BODY)
       }
       captureRow(captureStatus, generation)
+      analysisRow(analysisEligibility, analysisStatus, generation, hasPriorSuggestion = content.latestGuidance != null)
       button("Back", onClick = { dispatchBack(generation) })
       button(phoneActionLabel, style = ButtonStyle.SECONDARY, onClick = { dispatchPhone(generation) })
     }
   }
 
-  private fun dispatchDetails(generation: Long) {
+  // The dispatch* functions below are internal, not private, purely for testability: the Stage 2
+  // acceptance harness (display/ProjectContinuityHudTestHarness.kt under src/test) calls these
+  // exact same functions a real button tap would, against a fake Display - see stateMachine's doc
+  // above. Nothing about their behavior changes for production; they are simply reachable from a
+  // real button's onClick closure either way.
+  internal fun dispatchDetails(generation: Long) {
     val changed = synchronized(lock) { stateMachine.showDetails(generation) }
     if (changed) render()
   }
 
-  private fun dispatchBack(generation: Long) {
+  internal fun dispatchBack(generation: Long) {
     val changed = synchronized(lock) { stateMachine.showOverview(generation) }
     if (changed) render()
   }
 
-  private fun dispatchPhone(generation: Long) {
+  internal fun dispatchPhone(generation: Long) {
     val handoff = synchronized(lock) { stateMachine.phoneHandoff(generation) } ?: return
     onPhoneHandoff(handoff)
   }
 
-  private fun dispatchRefresh(generation: Long) {
+  internal fun dispatchRefresh(generation: Long) {
     val request = synchronized(lock) { stateMachine.acceptRefresh(generation) } ?: return
     render()
     load(request)
   }
 
-  private fun dispatchCapture(generation: Long) {
+  internal fun dispatchCapture(generation: Long) {
     val accepted = synchronized(lock) { stateMachine.acceptCapture(generation) }
     if (!accepted) return
     render()
@@ -404,7 +549,7 @@ internal class ProjectContinuityHudController(
     if (changed) render()
   }
 
-  private fun dispatchUse(generation: Long) {
+  internal fun dispatchUse(generation: Long) {
     // No render() here: acceptUse() never changes captureStatus by itself (see its doc) - the
     // screen stays exactly as-is (Use/Retake still visible but no longer tappable at this
     // generation) until the owner reports back via onCaptureAccepted/onCaptureFailed below.
@@ -413,7 +558,7 @@ internal class ProjectContinuityHudController(
     onUseRequested()
   }
 
-  private fun dispatchRetake(generation: Long) {
+  internal fun dispatchRetake(generation: Long) {
     val accepted = synchronized(lock) { stateMachine.acceptRetake(generation) }
     if (!accepted) return
     render()
@@ -433,6 +578,51 @@ internal class ProjectContinuityHudController(
    */
   fun onCaptureFailed(message: String) {
     val changed = synchronized(lock) { stateMachine.captureFailed(message) }
+    if (changed) render()
+  }
+
+  /** Called by the session owner whenever Analyze eligibility changes - see its doc. */
+  fun onAnalysisEligibilityChanged(eligibility: ProjectHudAnalysisEligibility) {
+    val changed = synchronized(lock) { stateMachine.setAnalysisEligibility(eligibility) }
+    if (changed) render()
+  }
+
+  internal fun dispatchAnalyze(generation: Long) {
+    val accepted = synchronized(lock) { stateMachine.acceptAnalyze(generation) }
+    if (!accepted) return
+    render()
+    onAnalyzeRequested()
+  }
+
+  internal fun dispatchTrustDecision(generation: Long, action: ProjectHudTrustAction) {
+    val sessionId = synchronized(lock) { stateMachine.acceptTrustDecision(generation, action) } ?: return
+    render()
+    onTrustDecisionRequested(action, sessionId)
+  }
+
+  /**
+   * Called by the session owner once a HUD-requested Analyze or trust decision has finished
+   * successfully. Triggers the same canonical Project refresh Refresh itself uses - this is what
+   * turns a completed analysis into a [ProjectHudPendingTrustReview] the HUD can act on, and what
+   * turns a completed trust decision into that review disappearing, without this class needing to
+   * understand Investigation internals at all - it only ever reflects what refreshing the Project
+   * returns, exactly like every other HUD screen already does.
+   */
+  fun onAnalysisSucceeded() {
+    val changed = synchronized(lock) { stateMachine.analysisSucceeded() }
+    if (!changed) return
+    render()
+    val request = synchronized(lock) { stateMachine.refresh() } ?: return
+    render()
+    load(request)
+  }
+
+  /**
+   * Called by the session owner when a HUD-requested Analyze or trust-decision submission failed.
+   * No retry is implied - the user retries by tapping Analyze, or the trust action again.
+   */
+  fun onAnalysisFailed(message: String) {
+    val changed = synchronized(lock) { stateMachine.analysisFailed(message) }
     if (changed) render()
   }
 

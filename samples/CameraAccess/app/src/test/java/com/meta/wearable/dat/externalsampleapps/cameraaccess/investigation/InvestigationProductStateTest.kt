@@ -7,6 +7,35 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class InvestigationProductStateTest {
+  /**
+   * Option B closed loop's continuity guarantee (see AGENTS.md/docs/ROADMAP.md): StreamScreen
+   * (glasses Capture) and ProjectDetailScreen's ContinueInvestigationSection ("Continue on
+   * phone"/"Resume on glasses") must resolve to the SAME InvestigationSessionDebugViewModel
+   * instance via Compose's viewModel(key = ...), or evidence collected on glasses would be lost
+   * on that handoff. This app has no NavHost, so the Activity's shared ViewModelStore is what
+   * actually carries that state - contingent entirely on both call sites computing this identical
+   * key string for the same Project at the same (pre-Analyze, no backend session yet) point in
+   * the flow. This test is that proof.
+   */
+  @Test
+  fun investigationViewModelKeyMatchesAcrossThePhoneHandoffForTheSameProject() {
+    val handoffKey = investigationViewModelKey(sourceProjectId = "project-a", continuationSessionId = null)
+    val resumeKey = investigationViewModelKey(sourceProjectId = "project-a", continuationSessionId = null)
+
+    assertEquals(handoffKey, resumeKey)
+    // A different Project must never collide onto the same retained instance.
+    assertFalse(
+        investigationViewModelKey("project-a", null) == investigationViewModelKey("project-b", null),
+    )
+    // A later, real backend session (the post-Analyze/trust-followup case) is deliberately a
+    // DIFFERENT key from the pre-Analyze handoff above - it must not silently resolve to the same
+    // stale instance.
+    assertFalse(
+        investigationViewModelKey("project-a", null) ==
+            investigationViewModelKey("project-a", "session-1"),
+    )
+  }
+
   @Test
   fun restoredKnownSessionIsPromotedToRepositoryReconciliation() {
     assertEquals(

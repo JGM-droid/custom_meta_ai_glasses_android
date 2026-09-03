@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudPhoneDestination
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 
@@ -67,7 +68,20 @@ private sealed interface TopLevelScreen {
 
   data object NewProject : TopLevelScreen
 
-  data class ProjectDetail(val project: ProjectSummary, val focusReview: Boolean = false) : TopLevelScreen
+  data class ProjectDetail(
+      val project: ProjectSummary,
+      val focusReview: Boolean = false,
+      // Set when this screen is the "Continue on phone" landing for an active, pre-Analyze
+      // investigation (ProjectHudPhoneDestination.ACTIVE_INVESTIGATION - see
+      // ProjectContinuityHudState.kt's phoneHandoff()) - tells ProjectDetailScreen to scroll
+      // straight to its ContinueInvestigationSection instead of leaving the user to find it.
+      val focusActiveInvestigation: Boolean = false,
+      // The exact continuationSessionId StreamScreen was already using when Continue on phone
+      // fired (null for a fresh, not-yet-submitted investigation) - reused so
+      // ContinueInvestigationSection resolves the SAME investigationViewModelKey instance rather
+      // than a fresh, empty one. See ProjectDetailScreen.kt's ContinueInvestigationSection doc.
+      val activeInvestigationSessionId: String? = null,
+  ) : TopLevelScreen
 
   data class ProjectWorkspace(val project: ProjectSummary) : TopLevelScreen
 
@@ -81,7 +95,16 @@ private val TopLevelScreenSaver = listSaver<TopLevelScreen, String>(
       when (screen) {
         TopLevelScreen.ProjectsHome -> listOf("home", "", "", "")
         TopLevelScreen.NewProject -> listOf("new", "", "", "")
-        is TopLevelScreen.ProjectDetail -> listOf("detail", screen.project.projectId, screen.project.name, screen.project.status, screen.focusReview.toString())
+        is TopLevelScreen.ProjectDetail ->
+            listOf(
+                "detail",
+                screen.project.projectId,
+                screen.project.name,
+                screen.project.status,
+                screen.focusReview.toString(),
+                screen.focusActiveInvestigation.toString(),
+                screen.activeInvestigationSessionId.orEmpty(),
+            )
         is TopLevelScreen.ProjectWorkspace -> listOf("workspace", screen.project.projectId, screen.project.name, screen.project.status)
         is TopLevelScreen.Capture -> listOf("capture", screen.sourceProject?.projectId.orEmpty(), screen.sourceProject?.name.orEmpty(), screen.sourceProject?.status.orEmpty(), screen.continuationSessionId.orEmpty())
       }
@@ -92,7 +115,15 @@ private val TopLevelScreenSaver = listSaver<TopLevelScreen, String>(
       }
       when (saved.firstOrNull()) {
         "new" -> TopLevelScreen.NewProject
-        "detail" -> project?.let { TopLevelScreen.ProjectDetail(it, saved.getOrNull(4).toBoolean()) } ?: TopLevelScreen.ProjectsHome
+        "detail" ->
+            project?.let {
+              TopLevelScreen.ProjectDetail(
+                  it,
+                  focusReview = saved.getOrNull(4).toBoolean(),
+                  focusActiveInvestigation = saved.getOrNull(5).toBoolean(),
+                  activeInvestigationSessionId = saved.getOrNull(6)?.takeIf(String::isNotBlank),
+              )
+            } ?: TopLevelScreen.ProjectsHome
         "workspace" -> project?.let(TopLevelScreen::ProjectWorkspace) ?: TopLevelScreen.ProjectsHome
         "capture" -> TopLevelScreen.Capture(project, saved.getOrNull(4)?.takeIf(String::isNotBlank))
         else -> TopLevelScreen.ProjectsHome
@@ -164,6 +195,8 @@ fun AppRoot(
             },
             onContinueProject = { project -> topLevelScreen = TopLevelScreen.ProjectWorkspace(project) },
             focusPendingReview = screen.focusReview,
+            focusActiveInvestigation = screen.focusActiveInvestigation,
+            investigationContinuationSessionId = screen.activeInvestigationSessionId,
             modifier = modifier,
         )
     is TopLevelScreen.ProjectWorkspace ->
@@ -205,8 +238,14 @@ fun AppRoot(
                   },
               onProjectHudPhoneHandoff =
                   screen.sourceProject?.let { project ->
-                    { needsReview ->
-                      topLevelScreen = TopLevelScreen.ProjectDetail(project, focusReview = needsReview)
+                    { destination, continuationSessionId ->
+                      topLevelScreen =
+                          TopLevelScreen.ProjectDetail(
+                              project,
+                              focusReview = destination == ProjectHudPhoneDestination.PROJECT_REVIEW,
+                              focusActiveInvestigation = destination == ProjectHudPhoneDestination.ACTIVE_INVESTIGATION,
+                              activeInvestigationSessionId = continuationSessionId,
+                          )
                     }
                   },
           )

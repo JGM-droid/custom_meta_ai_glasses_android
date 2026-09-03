@@ -18,6 +18,13 @@ internal enum class ProjectHudDestination {
 internal enum class ProjectHudPhoneDestination {
   PROJECT_DETAIL,
   PROJECT_REVIEW,
+  // An active, pre-Analyze investigation already has evidence captured (this HUD's own
+  // analysisEligibility.hasEvidence) but no explanation yet - the exact proven physical gap: the
+  // phone must land directly on that in-progress investigation/context-entry UI, not a generic
+  // Project screen the user then has to navigate away from to find their own just-captured
+  // photos. Takes priority over PROJECT_REVIEW (see phoneHandoff()'s doc) since it reflects what
+  // the user just did on THIS device, in THIS sitting.
+  ACTIVE_INVESTIGATION,
 }
 
 internal data class ProjectHudPhoneHandoff(
@@ -33,6 +40,7 @@ internal data class ProjectHudContent(
     val evidenceCount: Int,
     val latestGuidance: String?,
     val attentionSummary: String?,
+    val pendingTrustReview: ProjectHudPendingTrustReview? = null,
 ) {
   val isEmpty: Boolean
     get() =
@@ -44,6 +52,27 @@ internal data class ProjectHudContent(
 
   val hasAdditionalDetails: Boolean
     get() = evidenceCount > 0 || latestGuidance != null
+}
+
+/**
+ * An AI analysis result the canonical backend already holds for this Project that no trust
+ * decision has been recorded against yet - i.e. [com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.SavedInvestigationReview.trustDecision]
+ * is null. Presented as a HUD decision point (see [ProjectContinuityHudController]'s
+ * trustReviewScreen) rather than folded into [ProjectHudContent.latestGuidance], which keeps
+ * showing the same hypothesis text even after it has been decided on. [sessionId] is what a trust
+ * decision submits against - the same Investigation session this hypothesis came from.
+ */
+internal data class ProjectHudPendingTrustReview(
+    val sessionId: String,
+    val hypothesis: String,
+    val recommendedNextAction: String,
+)
+
+/** The three trust actions the roadmap requires - see docs/ROADMAP.md's Glasses foundation. */
+internal enum class ProjectHudTrustAction {
+  KEEP_AS_HYPOTHESIS,
+  ADD_EVIDENCE,
+  RETURN,
 }
 
 internal sealed interface ProjectHudUiState {
@@ -113,6 +142,37 @@ internal sealed interface ProjectHudCaptureStatus {
 }
 
 /**
+ * Whether Analyze is currently offered, and if not, why - pushed by the session owner from the
+ * Investigation ViewModel's own product-state derivation (investigation.deriveInvestigationProductState,
+ * reused as-is; never duplicated here). [canAnalyze] alone drives whether the Analyze action is
+ * tappable (unchanged gate); [hasEvidence]/[hasExplanation] exist only so the HUD can explain a
+ * `false` [canAnalyze] instead of silently omitting Analyze - the proven gap where evidence exists
+ * (a HUD Capture -> Use just happened) but explanation does not (the glasses have no free-text/
+ * voice input surface; only the phone's existing Investigation panel does).
+ */
+internal data class ProjectHudAnalysisEligibility(
+    val canAnalyze: Boolean = false,
+    val hasEvidence: Boolean = false,
+    val hasExplanation: Boolean = false,
+)
+
+/**
+ * Transient, presentation-only status shared by both halves of the Analyze lifecycle: starting an
+ * analysis (before [ProjectHudPendingTrustReview] exists) and submitting a trust decision against
+ * one (after it exists) - see [ProjectContinuityHudController]'s render precedence doc for how the
+ * same three states are interpreted differently in each phase. Independent of [ProjectHudUiState]
+ * for the same reason [ProjectHudCaptureStatus] is: it overlays current content rather than
+ * replacing it. [Failed] never clears itself - only a new explicit tap does.
+ */
+internal sealed interface ProjectHudAnalysisStatus {
+  data object Idle : ProjectHudAnalysisStatus
+
+  data object Working : ProjectHudAnalysisStatus
+
+  data class Failed(val message: String) : ProjectHudAnalysisStatus
+}
+
+/**
  * Pure state machine for the read-only HUD. It owns no Project persistence and performs no
  * network or DAT calls, which makes identity/race/callback behavior deterministic to test.
  */
@@ -126,6 +186,12 @@ internal class ProjectContinuityHudStateMachine {
   var captureStatus: ProjectHudCaptureStatus = ProjectHudCaptureStatus.Idle
     private set
 
+  var analysisEligibility: ProjectHudAnalysisEligibility = ProjectHudAnalysisEligibility()
+    private set
+
+  var analysisStatus: ProjectHudAnalysisStatus = ProjectHudAnalysisStatus.Idle
+    private set
+
   private var selectedProjectId: String? = null
   private var selectedProjectName: String? = null
   private var requestToken: Long = 0
@@ -137,9 +203,11 @@ internal class ProjectContinuityHudStateMachine {
     if (selectedProjectId != projectId) lastReadyContent = null
     selectedProjectId = projectId
     selectedProjectName = projectName
-    // A newly selected explicit Project can never inherit a capture status left over from
-    // whichever Project (or no Project) the HUD was previously attached to.
+    // A newly selected explicit Project can never inherit a capture/analysis status left over
+    // from whichever Project (or no Project) the HUD was previously attached to.
     captureStatus = ProjectHudCaptureStatus.Idle
+    analysisEligibility = ProjectHudAnalysisEligibility()
+    analysisStatus = ProjectHudAnalysisStatus.Idle
     uiState = ProjectHudUiState.Loading(projectId, projectName)
     advanceRender()
     return nextRequest(projectId, projectName)
@@ -189,10 +257,13 @@ internal class ProjectContinuityHudStateMachine {
   fun disconnected() {
     val projectId = selectedProjectId ?: return
     val projectName = selectedProjectName ?: return
-    // Whatever capture was in flight (or had just failed) belonged to the connection that just
-    // dropped - reconnecting must not resurrect a stale "Capturing..."/failure banner nothing
-    // will ever resolve.
+    // Whatever capture/analysis was in flight (or had just failed) belonged to the connection
+    // that just dropped - reconnecting must not resurrect a stale "Capturing..."/"Working..."/
+    // failure banner nothing will ever resolve. analysisEligibility is deliberately left alone: it
+    // is an availability signal from the Investigation ViewModel, not a request in flight, and a
+    // fresh render() once reconnected will pick up whatever it is by then anyway.
     captureStatus = ProjectHudCaptureStatus.Idle
+    analysisStatus = ProjectHudAnalysisStatus.Idle
     uiState = ProjectHudUiState.Disconnected(projectId, projectName)
     advanceRender()
   }
@@ -213,13 +284,26 @@ internal class ProjectContinuityHudStateMachine {
     return true
   }
 
+  /**
+   * ACTIVE_INVESTIGATION takes priority over PROJECT_REVIEW: evidence this HUD's own
+   * analysisEligibility already knows about was captured THIS sitting and has nowhere else to go
+   * but the phone yet (no glasses-side explanation input - see analysisRow's doc); a pending
+   * trust review, by contrast, was already saved to the canonical Project and will still be there
+   * whichever screen the phone opens on first. The two are not expected to coexist in practice
+   * (a completed investigation awaiting trust decision does not also leave stateMachine's
+   * analysisEligibility carrying hasEvidence=true for a NEW, separate not-yet-submitted round),
+   * but if they ever did, showing the user their own just-captured photos first is the more
+   * useful default.
+   */
   fun phoneHandoff(generation: Long): ProjectHudPhoneHandoff? {
     if (!acceptAction(generation, "phone")) return null
     val projectId = selectedProjectId ?: return null
     return ProjectHudPhoneHandoff(
         projectId = projectId,
         destination =
-            if (lastReadyContent?.attentionSummary != null) {
+            if (analysisEligibility.hasEvidence) {
+              ProjectHudPhoneDestination.ACTIVE_INVESTIGATION
+            } else if (lastReadyContent?.attentionSummary != null) {
               ProjectHudPhoneDestination.PROJECT_REVIEW
             } else {
               ProjectHudPhoneDestination.PROJECT_DETAIL
@@ -308,6 +392,75 @@ internal class ProjectContinuityHudStateMachine {
     return true
   }
 
+  /**
+   * Pushed by the session owner whenever the Investigation ViewModel's own eligibility signal
+   * changes - see [ProjectHudAnalysisEligibility]'s doc. Only a genuine change triggers a render;
+   * this is an availability signal, not a user action, so it is not generation-guarded like
+   * [acceptAction]-backed methods.
+   */
+  fun setAnalysisEligibility(eligibility: ProjectHudAnalysisEligibility): Boolean {
+    if (analysisEligibility == eligibility) return false
+    analysisEligibility = eligibility
+    advanceRender()
+    return true
+  }
+
+  /**
+   * Accepts one HUD-triggered Analyze tap. Only valid while analysis is actually offered
+   * ([ProjectHudAnalysisEligibility.canAnalyze]) and nothing is already Working - duplicate-press
+   * safe the same way [acceptCapture] is.
+   */
+  fun acceptAnalyze(generation: Long): Boolean {
+    if (!acceptAction(generation, "analyze")) return false
+    if (!analysisEligibility.canAnalyze || analysisStatus is ProjectHudAnalysisStatus.Working) return false
+    analysisStatus = ProjectHudAnalysisStatus.Working
+    advanceRender()
+    return true
+  }
+
+  /**
+   * Accepts one trust-decision tap while a completed analysis is awaiting one -
+   * [ProjectHudContent.pendingTrustReview] on the current Ready content. Returns the session_id to
+   * submit the decision against, or null if there is nothing to decide on (defense against a stale
+   * tap - e.g. content moved on) or one is already being submitted. Mirrors [phoneHandoff] in
+   * returning the payload directly rather than a bare Boolean.
+   */
+  fun acceptTrustDecision(generation: Long, action: ProjectHudTrustAction): String? {
+    if (!acceptAction(generation, "trust:${action.name}")) return null
+    val pending = (uiState as? ProjectHudUiState.Ready)?.content?.pendingTrustReview ?: return null
+    if (analysisStatus is ProjectHudAnalysisStatus.Working) return null
+    analysisStatus = ProjectHudAnalysisStatus.Working
+    advanceRender()
+    return pending.sessionId
+  }
+
+  /**
+   * Called once a HUD-requested Analyze or trust decision has finished successfully. Both simply
+   * return to Idle - the actual result (a fresh [ProjectHudPendingTrustReview], or its absence
+   * once a trust decision has been recorded) arrives through the canonical Project refresh the
+   * controller performs right after calling this, not through this method itself. That refresh is
+   * what makes "Project state should refresh after a validated change" true without this state
+   * machine needing to know anything about Investigation internals.
+   */
+  fun analysisSucceeded(): Boolean {
+    if (analysisStatus !is ProjectHudAnalysisStatus.Working) return false
+    analysisStatus = ProjectHudAnalysisStatus.Idle
+    advanceRender()
+    return true
+  }
+
+  /**
+   * Called when either an Analyze attempt or a trust-decision submission failed. Shared with
+   * [captureFailed]'s same reasoning: honest failure next to existing content, no automatic retry
+   * - the next attempt is always a fresh explicit tap.
+   */
+  fun analysisFailed(message: String): Boolean {
+    if (analysisStatus !is ProjectHudAnalysisStatus.Working) return false
+    analysisStatus = ProjectHudAnalysisStatus.Failed(message.ifBlank { "Analyze failed." })
+    advanceRender()
+    return true
+  }
+
   fun phoneActionLabel(): String =
       if (lastReadyContent?.attentionSummary != null) "Review on phone" else "Continue on phone"
 
@@ -347,6 +500,17 @@ internal class ProjectContinuityHudStateMachine {
             // unconfirmed label for every AI hypothesis it projects.
             "AI suggestion — unconfirmed: $it"
           }
+      // A HUD decision point only while no trust decision has been recorded yet - once one has,
+      // this naturally disappears on the next refresh without the HUD needing to track "already
+      // decided" itself; it is simply reading the same canonical field the phone already does.
+      val pendingTrustReview =
+          investigation?.takeIf { it.trustDecision == null }?.let {
+            ProjectHudPendingTrustReview(
+                sessionId = it.sessionId,
+                hypothesis = it.hypothesis,
+                recommendedNextAction = it.recommendedNextAction,
+            )
+          }
       return ProjectHudContent(
           projectId = overview.project.projectId,
           projectName = overview.project.name.ifBlank { fallbackProjectName },
@@ -355,6 +519,7 @@ internal class ProjectContinuityHudStateMachine {
           evidenceCount = investigation?.evidenceCount ?: 0,
           latestGuidance = latestGuidance,
           attentionSummary = attention,
+          pendingTrustReview = pendingTrustReview,
       )
     }
   }
