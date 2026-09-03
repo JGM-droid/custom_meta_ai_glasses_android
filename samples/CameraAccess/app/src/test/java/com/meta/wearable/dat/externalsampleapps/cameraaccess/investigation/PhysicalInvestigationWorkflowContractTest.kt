@@ -39,11 +39,13 @@ class PhysicalInvestigationWorkflowContractTest {
     val viewModel = readInvestigation("InvestigationSessionDebugViewModel.kt")
 
     assertTrue(panel.contains("productState.phase == InvestigationProductPhase.COMPLETED"))
-    assertTrue(panel.contains("if (uiState.trustControlsAvailable)"))
+    // Gated on trustControlsAvailable AND no decision recorded yet - once a decision exists,
+    // these buttons hide (see BackendInvestigationPanel's own doc on why).
+    assertTrue(panel.contains("uiState.trustControlsAvailable && uiState.trustDecision == null"))
     assertTrue(panel.contains("BackendTrustDecision.CONTINUE"))
     assertTrue(panel.contains("BackendTrustDecision.DISAGREE"))
     assertTrue(panel.contains("BackendTrustDecision.MORE_EVIDENCE"))
-    assertTrue(panel.contains("AI SUGGESTION — UNCONFIRMED"))
+    assertTrue(panel.contains("AI suggestion"))
     assertTrue(viewModel.contains("sourceProjectId ?: return"))
     assertTrue(viewModel.contains("continuationSessionId = followUpId"))
   }

@@ -80,16 +80,30 @@ class SavedInvestigationProjectDetailContractTest {
     assertFalse(appRoot.contains("onOpenCapture = { topLevelScreen = TopLevelScreen.Capture() }"))
   }
 
+  /**
+   * Glasses<->phone trust UX simplification: the phone panel's three trust-action labels read as
+   * plain human language ("Looks right"/"Add more info"/"Not quite"), not engineering shorthand
+   * ("working hypothesis"/"record your assessment"/"does not update the Project"/"apply to
+   * project") - but only the labels/copy changed. Each still routes to its unchanged
+   * BackendTrustDecision, proving persistence/trust semantics are untouched underneath.
+   */
   @Test
   fun humanLabelsPreserveUnderlyingTrustSemantics() {
     val panel = File(root, "ui/BackendInvestigationPanel.kt").readText()
-    val detail = File(root, "ui/ProjectDetailScreen.kt").readText()
-    assertTrue(panel.contains("Keep as working hypothesis"))
+
+    assertTrue(panel.contains("Looks right"))
     assertTrue(panel.contains("BackendTrustDecision.CONTINUE"))
-    assertTrue(panel.contains("I disagree"))
+    assertTrue(panel.contains("Not quite"))
     assertTrue(panel.contains("BackendTrustDecision.DISAGREE"))
-    assertTrue(panel.contains("Add more evidence"))
+    assertTrue(panel.contains("Add more info"))
     assertTrue(panel.contains("BackendTrustDecision.MORE_EVIDENCE"))
-    assertTrue(panel.contains("does not update the Project"))
+
+    // The old engineering-facing copy is gone from the normal flow.
+    assertFalse(panel.contains("working hypothesis"))
+    assertFalse(panel.contains("record your assessment"))
+    assertFalse(panel.contains("does not update the Project"))
+    assertFalse(panel.contains("Apply to Project"))
+    assertFalse(panel.contains("I disagree"))
+    assertFalse(panel.contains("Add more evidence"))
   }
 }

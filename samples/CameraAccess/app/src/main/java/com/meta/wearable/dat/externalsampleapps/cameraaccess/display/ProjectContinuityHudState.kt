@@ -18,12 +18,14 @@ internal enum class ProjectHudDestination {
 internal enum class ProjectHudPhoneDestination {
   PROJECT_DETAIL,
   PROJECT_REVIEW,
-  // An active, pre-Analyze investigation already has evidence captured (this HUD's own
-  // analysisEligibility.hasEvidence) but no explanation yet - the exact proven physical gap: the
-  // phone must land directly on that in-progress investigation/context-entry UI, not a generic
-  // Project screen the user then has to navigate away from to find their own just-captured
-  // photos. Takes priority over PROJECT_REVIEW (see phoneHandoff()'s doc) since it reflects what
-  // the user just did on THIS device, in THIS sitting.
+  // Evidence was accepted (a HUD Capture -> Use completed) during the CURRENT glasses Project
+  // session - see ProjectContinuityHudStateMachine.evidenceAcceptedThisSession, set synchronously
+  // by captureAccepted(), never by the Investigation ViewModel's asynchronous eligibility push
+  // (proven physically unreliable to depend on for this decision - see phoneHandoff()'s doc). The
+  // phone must land directly on that in-progress investigation UI, not a generic Project screen
+  // the user then has to navigate away from to find their own just-captured photos. Takes
+  // priority over PROJECT_REVIEW (see phoneHandoff()'s doc) since it reflects what the user just
+  // did on THIS device, in THIS sitting.
   ACTIVE_INVESTIGATION,
 }
 
@@ -189,6 +191,17 @@ internal class ProjectContinuityHudStateMachine {
   var analysisEligibility: ProjectHudAnalysisEligibility = ProjectHudAnalysisEligibility()
     private set
 
+  // Deterministic Continue-on-phone signal - see ProjectHudPhoneDestination.ACTIVE_INVESTIGATION's
+  // doc. Set synchronously by captureAccepted() (a real Use just completed) - never by the
+  // Investigation ViewModel's asynchronous analysisEligibility push, which phoneHandoff() used to
+  // depend on and which proved unreliable to time against a real physical Continue-on-phone tap.
+  // Reset in selectProject() - the same explicit-Project boundary every other per-Project field
+  // here already resets at - so it can never leak across Projects or across a torn-down/reattached
+  // session for the SAME Project (stopStream() clears StreamViewModel's own project marker, which
+  // forces a fresh selectProject() on the next attach - see StreamViewModel.configureProjectHud).
+  var evidenceAcceptedThisSession: Boolean = false
+    private set
+
   var analysisStatus: ProjectHudAnalysisStatus = ProjectHudAnalysisStatus.Idle
     private set
 
@@ -208,6 +221,7 @@ internal class ProjectContinuityHudStateMachine {
     captureStatus = ProjectHudCaptureStatus.Idle
     analysisEligibility = ProjectHudAnalysisEligibility()
     analysisStatus = ProjectHudAnalysisStatus.Idle
+    evidenceAcceptedThisSession = false
     uiState = ProjectHudUiState.Loading(projectId, projectName)
     advanceRender()
     return nextRequest(projectId, projectName)
@@ -285,15 +299,16 @@ internal class ProjectContinuityHudStateMachine {
   }
 
   /**
-   * ACTIVE_INVESTIGATION takes priority over PROJECT_REVIEW: evidence this HUD's own
-   * analysisEligibility already knows about was captured THIS sitting and has nowhere else to go
-   * but the phone yet (no glasses-side explanation input - see analysisRow's doc); a pending
-   * trust review, by contrast, was already saved to the canonical Project and will still be there
-   * whichever screen the phone opens on first. The two are not expected to coexist in practice
-   * (a completed investigation awaiting trust decision does not also leave stateMachine's
-   * analysisEligibility carrying hasEvidence=true for a NEW, separate not-yet-submitted round),
-   * but if they ever did, showing the user their own just-captured photos first is the more
-   * useful default.
+   * ACTIVE_INVESTIGATION takes priority over PROJECT_REVIEW: evidence accepted THIS sitting
+   * ([evidenceAcceptedThisSession] - set synchronously by [captureAccepted], never from the
+   * Investigation ViewModel's asynchronous eligibility push, which this decision used to depend
+   * on and proved unreliable to time against a real physical Continue-on-phone tap) has nowhere
+   * else to go but the phone yet; a pending trust review, by contrast, was already saved to the
+   * canonical Project and will still be there whichever screen the phone opens on first. The two
+   * are not expected to coexist in practice (a fresh selectProject() - which a torn-down/
+   * reattached session for the same Project always forces - resets evidenceAcceptedThisSession
+   * before an OLDER pending review would ever be visible again), but if they ever did, showing
+   * the user their own just-captured photos first is the more useful default.
    */
   fun phoneHandoff(generation: Long): ProjectHudPhoneHandoff? {
     if (!acceptAction(generation, "phone")) return null
@@ -301,7 +316,7 @@ internal class ProjectContinuityHudStateMachine {
     return ProjectHudPhoneHandoff(
         projectId = projectId,
         destination =
-            if (analysisEligibility.hasEvidence) {
+            if (evidenceAcceptedThisSession) {
               ProjectHudPhoneDestination.ACTIVE_INVESTIGATION
             } else if (lastReadyContent?.attentionSummary != null) {
               ProjectHudPhoneDestination.PROJECT_REVIEW
@@ -375,6 +390,9 @@ internal class ProjectContinuityHudStateMachine {
   fun captureAccepted(): Boolean {
     if (captureStatus !is ProjectHudCaptureStatus.AwaitingConfirmation) return false
     captureStatus = ProjectHudCaptureStatus.Idle
+    // The deterministic Continue-on-phone signal - see its own doc. Set here, synchronously,
+    // rather than waiting for the Investigation ViewModel's asynchronous eligibility push.
+    evidenceAcceptedThisSession = true
     advanceRender()
     return true
   }

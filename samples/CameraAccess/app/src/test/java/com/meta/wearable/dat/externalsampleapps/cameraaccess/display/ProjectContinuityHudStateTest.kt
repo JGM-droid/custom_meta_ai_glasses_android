@@ -153,20 +153,27 @@ class ProjectContinuityHudStateTest {
   }
 
   /**
-   * Proven physical gap: Capture -> Use leaves evidence captured but no explanation yet
-   * (analysisEligibility.hasEvidence, no glasses-side explanation input - see analysisRow's
-   * doc). Continue on phone from THAT state must land the phone directly on the active
-   * investigation, not a generic Project screen the user then has to navigate away from to find
-   * their own just-captured photos.
+   * Proven physical gap: Capture -> Use leaves evidence accepted, and Continue on phone from
+   * THAT state must land the phone directly on the active investigation - not a generic Project
+   * screen the user then has to navigate away from to find their own just-captured photos.
+   *
+   * Deliberately drives this through the REAL captureAccepted() event (via acceptCapture ->
+   * captureSucceeded -> acceptUse -> captureAccepted), never via setAnalysisEligibility(): this
+   * decision proved unreliable in practice while it depended on analysisEligibility, an
+   * asynchronous signal pushed in from a DIFFERENT ViewModel over a real StateFlow/LaunchedEffect
+   * round trip. It must now be provable from this HUD's own synchronous state alone - this test
+   * intentionally never touches analysisEligibility at all.
    */
   @Test
-  fun activeInvestigationHandoffIsOfferedWhenEvidenceExistsWithoutExplanation() {
+  fun activeInvestigationHandoffIsOfferedAfterARealCaptureAcceptedEvent() {
     val state = loadedState()
-    state.setAnalysisEligibility(
-        ProjectHudAnalysisEligibility(canAnalyze = false, hasEvidence = true, hasExplanation = false),
-    )
+    state.acceptCapture(state.renderGeneration)
+    state.captureSucceeded()
+    state.acceptUse(state.renderGeneration)
+    state.captureAccepted()
     val generation = state.renderGeneration
 
+    assertTrue(state.evidenceAcceptedThisSession)
     assertEquals(
         ProjectHudPhoneHandoff(PROJECT_A, ProjectHudPhoneDestination.ACTIVE_INVESTIGATION),
         state.phoneHandoff(generation),
@@ -175,20 +182,49 @@ class ProjectContinuityHudStateTest {
 
   /**
    * ACTIVE_INVESTIGATION takes priority over PROJECT_REVIEW (see phoneHandoff()'s doc): even
-   * with a pending trust review already saved to the canonical Project, evidence captured THIS
+   * with a pending trust review already saved to the canonical Project, evidence accepted THIS
    * sitting with nowhere else to go yet is the more useful phone landing.
    */
   @Test
   fun activeInvestigationHandoffTakesPriorityOverPendingReview() {
     val state = loadedState(proposalCount = 1)
-    state.setAnalysisEligibility(
-        ProjectHudAnalysisEligibility(canAnalyze = false, hasEvidence = true, hasExplanation = false),
-    )
+    state.acceptCapture(state.renderGeneration)
+    state.captureSucceeded()
+    state.acceptUse(state.renderGeneration)
+    state.captureAccepted()
     val generation = state.renderGeneration
 
     assertEquals(
         ProjectHudPhoneDestination.ACTIVE_INVESTIGATION,
         state.phoneHandoff(generation)?.destination,
+    )
+  }
+
+  /**
+   * The other half of the determinism fix: evidenceAcceptedThisSession must reset at the
+   * explicit-Project boundary, so a NEW Project (or a fresh selectProject() forced by
+   * StreamViewModel's own stopStream()-then-reattach marker-clearing for the SAME Project - see
+   * evidenceAcceptedThisSession's doc) never inherits a stale "evidence accepted" signal that
+   * would wrongly route Continue on phone to ACTIVE_INVESTIGATION for a session that captured
+   * nothing.
+   */
+  @Test
+  fun evidenceAcceptedThisSessionResetsOnFreshProjectSelection() {
+    val state = loadedState()
+    state.acceptCapture(state.renderGeneration)
+    state.captureSucceeded()
+    state.acceptUse(state.renderGeneration)
+    state.captureAccepted()
+    assertTrue(state.evidenceAcceptedThisSession)
+
+    // A fresh selectProject() for the SAME Project - exactly what re-entering Capture after
+    // Continue on phone forces (stopStream() clears StreamViewModel's project marker).
+    state.selectProject(PROJECT_A, "AC Repair")
+
+    assertFalse(state.evidenceAcceptedThisSession)
+    assertEquals(
+        ProjectHudPhoneDestination.PROJECT_DETAIL,
+        state.phoneHandoff(state.renderGeneration)?.destination,
     )
   }
 

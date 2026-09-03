@@ -160,7 +160,11 @@ class ProjectContinuityHudAcceptanceHarnessTest {
    * Proven physical gap this closes: from the exact same missing-explanation state as the test
    * above, "Continue on phone" (dispatchPhone) through the REAL controller must land on
    * ACTIVE_INVESTIGATION - not the generic PROJECT_DETAIL a caller (StreamScreen) would otherwise
-   * send the user to a screen with no visible trace of their own just-captured evidence.
+   * send the user to a screen with no visible trace of their own just-captured evidence. The
+   * pushAnalysisEligibility call here is unrelated to that destination now (see
+   * activeInvestigationHandoffFiresWithoutAnyAnalysisEligibilityPush below for the direct proof
+   * of that) - it only sets up this test's OWN missing-explanation condition, still exercised
+   * because ADD/hasExplanation gating (canAnalyze) is otherwise untouched by this milestone.
    */
   @Test
   fun continueOnPhoneFromMissingExplanationStateOffersActiveInvestigationHandoff() = runBlocking {
@@ -183,6 +187,31 @@ class ProjectContinuityHudAcceptanceHarnessTest {
   }
 
   /**
+   * The direct proof of this milestone's determinism fix: ACTIVE_INVESTIGATION must fire from
+   * captureAccepted() alone - this test never calls pushAnalysisEligibility at all, unlike every
+   * other test above/below that happens to also exercise it for its own (canAnalyze-gating)
+   * reasons. phoneHandoff() no longer reads analysisEligibility for this decision at all (see
+   * ProjectContinuityHudState.kt).
+   */
+  @Test
+  fun activeInvestigationHandoffFiresWithoutAnyAnalysisEligibilityPush() = runBlocking {
+    val harness = ProjectContinuityHudTestHarness(initialOverview = emptyOverview())
+    harness.openProject(PROJECT_A, "AC Repair")
+    harness.attachDisplay()
+    harness.tapCapture()
+    harness.completeCaptureSuccess()
+    harness.tapUse()
+    harness.completeUseAccepted()
+
+    assertTrue(harness.stateMachine.evidenceAcceptedThisSession)
+    harness.tapPhone()
+
+    assertEquals(1, harness.phoneHandoffs.size)
+    assertEquals(ProjectHudPhoneDestination.ACTIVE_INVESTIGATION, harness.phoneHandoffs.single().destination)
+    harness.close()
+  }
+
+  /**
    * Option B closed loop (docs/ROADMAP.md): "Continue on phone" (dispatchPhone) hands off to the
    * phone-native ContinueInvestigationSection (ProjectDetailScreen.kt), which reuses the SAME
    * InvestigationSessionDebugViewModel instance the glasses side was using (see
@@ -195,7 +224,11 @@ class ProjectContinuityHudAcceptanceHarnessTest {
    * (ProjectContinuityHudState.kt) - this proves the SAME reactive eligibility push already
    * exercised elsewhere in this harness (StreamScreen's LaunchedEffect(hudAnalysisEligibility) in
    * production) is what re-establishes it from the now-populated phone-side state after that
-   * reset, not any value magically carried through reselection itself.
+   * reset, not any value magically carried through reselection itself. Note: this test is about
+   * canAnalyze gating specifically, not the phone-handoff DESTINATION decision, which is now
+   * evidenceAcceptedThisSession's job (also correctly reset by this same selectProject() call -
+   * see evidenceAcceptedThisSessionResetsOnFreshProjectSelection in
+   * ProjectContinuityHudStateTest.kt).
    */
   @Test
   fun phoneHandoffThenResumeOnGlasses_reselectionResetsEligibilityUntilReactivelyRestored() = runBlocking {
@@ -231,6 +264,80 @@ class ProjectContinuityHudAcceptanceHarnessTest {
 
     harness.tapAnalyze()
     assertEquals(1, harness.analyzeRequestedCount)
+    harness.close()
+  }
+
+  /**
+   * Simplified MVP: the trust-review screen's third action ("See details on phone") is a plain
+   * phone handoff (dispatchPhone), never a ProjectHudTrustAction.RETURN/DISAGREE submission -
+   * proven through the real controller by asserting no trust decision was ever requested and the
+   * pending review is still exactly as undecided as before the tap (the user is only looking
+   * closer, not deciding yet).
+   */
+  @Test
+  fun seeDetailsOnPhoneFromPendingTrustReviewIsAPlainHandoffNotATrustDecision() = runBlocking {
+    val harness = ProjectContinuityHudTestHarness(initialOverview = emptyOverview())
+    harness.openProject(PROJECT_A, "AC Repair")
+    harness.attachDisplay()
+    harness.tapCapture()
+    harness.completeCaptureSuccess()
+    harness.tapUse()
+    harness.completeUseAccepted()
+    harness.pushAnalysisEligibility(
+        ProjectHudAnalysisEligibility(canAnalyze = true, hasEvidence = true, hasExplanation = true),
+    )
+    harness.tapAnalyze()
+    harness.repository.currentOverview = overviewWithUndecidedReview()
+    harness.completeAnalysisSucceeded()
+    val pendingBefore = (harness.stateMachine.uiState as ProjectHudUiState.Ready).content.pendingTrustReview
+    assertEquals(SESSION_ID, pendingBefore?.sessionId)
+
+    harness.tapPhone()
+
+    assertEquals(1, harness.phoneHandoffs.size)
+    assertTrue(harness.trustDecisionRequests.isEmpty())
+    assertEquals(ProjectHudAnalysisStatus.Idle, harness.stateMachine.analysisStatus)
+    val pendingAfter = (harness.stateMachine.uiState as ProjectHudUiState.Ready).content.pendingTrustReview
+    assertEquals(pendingBefore, pendingAfter)
+    harness.close()
+  }
+
+  /**
+   * Simplified MVP requirement: "Add more info" must naturally allow the user to continue
+   * gathering evidence, including another glasses photo. Proven through the real controller: once
+   * the follow-up round's canonical refresh lands (the SAME existing refresh mechanism every
+   * other completed Analyze/trust round already uses - see onAnalysisSucceeded's doc), Capture is
+   * immediately dispatchable again with no special-casing - captureRow only ever hides Capture
+   * for Loading/Disconnected/Error, none of which a fresh follow-up round is.
+   */
+  @Test
+  fun addMoreInfoTrustDecisionLeavesTheHudReadyForAnotherCapture() = runBlocking {
+    val harness = ProjectContinuityHudTestHarness(initialOverview = emptyOverview())
+    harness.openProject(PROJECT_A, "AC Repair")
+    harness.attachDisplay()
+    harness.tapCapture()
+    harness.completeCaptureSuccess()
+    harness.tapUse()
+    harness.completeUseAccepted()
+    harness.pushAnalysisEligibility(
+        ProjectHudAnalysisEligibility(canAnalyze = true, hasEvidence = true, hasExplanation = true),
+    )
+    harness.tapAnalyze()
+    harness.repository.currentOverview = overviewWithUndecidedReview()
+    harness.completeAnalysisSucceeded()
+
+    harness.tapTrustDecision(ProjectHudTrustAction.ADD_EVIDENCE)
+    assertEquals(listOf(ProjectHudTrustAction.ADD_EVIDENCE to SESSION_ID), harness.trustDecisionRequests)
+    assertEquals(ProjectHudAnalysisStatus.Working, harness.stateMachine.analysisStatus)
+
+    // The follow-up round's own canonical refresh - no pending review yet for the NEW round.
+    harness.repository.currentOverview = emptyOverview()
+    harness.completeAnalysisSucceeded()
+
+    assertNull((harness.stateMachine.uiState as ProjectHudUiState.Ready).content.pendingTrustReview)
+    assertEquals(ProjectHudCaptureStatus.Idle, harness.stateMachine.captureStatus)
+    harness.tapCapture()
+    assertEquals(ProjectHudCaptureStatus.Capturing, harness.stateMachine.captureStatus)
     harness.close()
   }
 

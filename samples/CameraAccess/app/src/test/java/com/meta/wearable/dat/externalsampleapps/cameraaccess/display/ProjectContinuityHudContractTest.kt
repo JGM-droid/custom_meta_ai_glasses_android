@@ -66,10 +66,48 @@ class ProjectContinuityHudContractTest {
     val appRoot = File(root, "ui/AppRoot.kt").readText()
 
     assertTrue(state.contains("ACTIVE_INVESTIGATION"))
-    assertTrue(state.contains("analysisEligibility.hasEvidence"))
     assertTrue(stream.contains("onProjectHudPhoneHandoff?.invoke(handoff.destination, continuationSessionId)"))
     assertTrue(appRoot.contains("focusActiveInvestigation = destination == ProjectHudPhoneDestination.ACTIVE_INVESTIGATION"))
     assertTrue(appRoot.contains("activeInvestigationSessionId = continuationSessionId"))
+  }
+
+  /**
+   * Second pass: phoneHandoff()'s ACTIVE_INVESTIGATION decision proved unreliable to time against
+   * a real physical Continue-on-phone tap while it depended on analysisEligibility.hasEvidence -
+   * an asynchronous signal pushed in from a DIFFERENT ViewModel (InvestigationSessionDebugViewModel,
+   * via StreamScreen's own reactive LaunchedEffect). It must now depend only on this HUD's own
+   * synchronous captureAccepted() event.
+   */
+  @Test
+  fun phoneHandoffNoLongerDependsOnTheAsynchronousAnalysisEligibilitySignal() {
+    val state = File(root, "display/ProjectContinuityHudState.kt").readText()
+
+    assertFalse(state.contains("if (analysisEligibility.hasEvidence)"))
+    assertTrue(state.contains("evidenceAcceptedThisSession"))
+    assertTrue(state.contains("if (evidenceAcceptedThisSession)"))
+    // Set synchronously by the real Use-accept event, not pushed in from outside.
+    val captureAcceptedStart = state.indexOf("fun captureAccepted(): Boolean")
+    val nextFunStart = state.indexOf("fun ", captureAcceptedStart + 1)
+    assertTrue(captureAcceptedStart >= 0)
+    assertTrue(state.substring(captureAcceptedStart, nextFunStart).contains("evidenceAcceptedThisSession = true"))
+    // Reset at the explicit-Project boundary every other per-Project field here already resets at.
+    val selectProjectStart = state.indexOf("fun selectProject(")
+    val selectProjectEnd = state.indexOf("fun refresh(")
+    assertTrue(state.substring(selectProjectStart, selectProjectEnd).contains("evidenceAcceptedThisSession = false"))
+  }
+
+  /**
+   * "Preserve existing internal trust semantics" - RETURN's own dispatch routing and its backend
+   * DISAGREE mapping stay fully intact even though trustReviewScreen no longer surfaces a button
+   * for it (see hudTrustAndAnalyzeLabelsAreHumanFacingWithInternalSemanticsUnchanged above).
+   */
+  @Test
+  fun returnTrustActionAndItsDisagreeMappingRemainIntactEvenThoughUnsurfaced() {
+    val state = File(root, "display/ProjectContinuityHudState.kt").readText()
+    val stream = File(root, "ui/StreamScreen.kt").readText()
+
+    assertTrue(state.contains("RETURN,"))
+    assertTrue(stream.contains("ProjectHudTrustAction.RETURN -> BackendTrustDecision.DISAGREE"))
   }
 
   /**
@@ -250,12 +288,20 @@ class ProjectContinuityHudContractTest {
     // New human-facing trust-action labels, each still routed to its unchanged internal action.
     assertTrue(controller.contains("button(\"Looks right\", onClick = { dispatchTrustDecision(generation, ProjectHudTrustAction.KEEP_AS_HYPOTHESIS) })"))
     assertTrue(controller.contains("button(\"Add more info\", onClick = { dispatchTrustDecision(generation, ProjectHudTrustAction.ADD_EVIDENCE) })"))
-    assertTrue(controller.contains("button(\"Go back\", style = ButtonStyle.SECONDARY, onClick = { dispatchTrustDecision(generation, ProjectHudTrustAction.RETURN) })"))
+    // Third action is a plain phone handoff, not a trust-decision submission - see
+    // trustReviewScreen's doc. RETURN/DISAGREE's own dispatch routing stays intact elsewhere
+    // (ProjectHudTrustAction's enum value, dispatchTrustDecision's routing) - this screen simply
+    // no longer surfaces a button for it. Labeled "Not quite" - the same disagreement/revision
+    // wording BackendInvestigationPanel's own trust action uses for the same concept (glasses<->
+    // phone trust UX simplification pass).
+    assertTrue(controller.contains("button(\"Not quite\", style = ButtonStyle.SECONDARY, onClick = { dispatchPhone(generation) })"))
     // The old engineering-facing labels are gone as button text specifically (not just anywhere
     // in the file, since a doc comment is allowed to mention the old wording in prose).
     assertFalse(controller.contains("button(\"Keep as hypothesis\""))
     assertFalse(controller.contains("button(\"Add evidence\""))
     assertFalse(controller.contains("button(\"Return\""))
+    assertFalse(controller.contains("button(\"Go back\""))
+    assertFalse(controller.contains("button(\"See details on phone\""))
 
     // AI-result framing stays clearly unconfirmed, just less like a system label.
     assertTrue(controller.contains("NOT CONFIRMED YET"))

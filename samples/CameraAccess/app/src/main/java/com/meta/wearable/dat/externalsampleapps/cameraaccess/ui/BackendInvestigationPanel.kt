@@ -318,12 +318,12 @@ internal fun BackendInvestigationPanel(
         if (productState.phase == InvestigationProductPhase.COMPLETED && compactResult != null) {
         HorizontalDivider()
         Text(
-            text = "AI SUGGESTION — UNCONFIRMED",
+            text = "AI suggestion",
             style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
-            text = "This is an AI suggestion, not confirmed Project truth.",
+            text = "Not confirmed yet.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -332,7 +332,7 @@ internal fun BackendInvestigationPanel(
             style = MaterialTheme.typography.bodyLarge,
         )
         Text(
-            text = "NEXT ACTION",
+            text = "Suggested next step",
             style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.SemiBold,
         )
@@ -341,45 +341,47 @@ internal fun BackendInvestigationPanel(
             style = MaterialTheme.typography.bodyLarge,
         )
 
-        if (uiState.trustControlsAvailable) {
+        // Gated on no decision recorded yet, not just trustControlsAvailable - once a decision
+        // exists these buttons hide (previously they stayed visible/tappable forever, which was
+        // the core of the "pressing Looks right appears to have no visible effect" complaint: a
+        // real trust decision landed, but nothing on screen ever looked any different). The
+        // confirmation text below (uiState.trustMessage) and the Return button now carry that
+        // visible effect instead.
+        if (uiState.trustControlsAvailable && uiState.trustDecision == null) {
           HorizontalDivider()
-          Text(
-              text = "What should happen next?",
-              style = MaterialTheme.typography.titleSmall,
-              fontWeight = FontWeight.SemiBold,
-          )
-          Text(
-              text = "Keeping this as a working hypothesis records your assessment. It does not update the Project. Any suggested Project change still requires Apply to Project.",
-              style = MaterialTheme.typography.bodySmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
-          )
           Button(
               onClick = { viewModel.submitTrustDecision(BackendTrustDecision.CONTINUE) },
               modifier = Modifier.fillMaxWidth(),
               enabled = !uiState.trustDecisionInFlight,
           ) {
-            Text("Keep as working hypothesis")
+            Text("Looks right")
           }
           Button(
               onClick = { viewModel.submitTrustDecision(BackendTrustDecision.MORE_EVIDENCE) },
               modifier = Modifier.fillMaxWidth(),
               enabled = !uiState.trustDecisionInFlight,
           ) {
-            Text("Add more evidence")
+            Text("Add more info")
           }
-          TextButton(
+          Button(
               onClick = { showDisagreeInput = !showDisagreeInput },
+              modifier = Modifier.fillMaxWidth(),
               enabled = !uiState.trustDecisionInFlight,
+              colors =
+                  ButtonDefaults.buttonColors(
+                      containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                      contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                  ),
           ) {
-            Text("I disagree")
+            Text("Not quite")
           }
           if (showDisagreeInput) {
             OutlinedTextField(
                 value = uiState.trustCorrectionText,
                 onValueChange = viewModel::setTrustCorrectionText,
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("Optional explanation or correction") },
-                placeholder = { Text("You can disagree without knowing the correct answer") },
+                label = { Text("What should it say instead?") },
+                placeholder = { Text("Optional - you can correct it or just flag it as wrong") },
                 minLines = 2,
             )
             Button(
@@ -387,11 +389,11 @@ internal fun BackendInvestigationPanel(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !uiState.trustDecisionInFlight,
             ) {
-              Text("Save disagreement")
+              Text("Submit")
             }
           }
           if (uiState.trustDecisionInFlight) {
-            Text("Saving decision…")
+            Text("Saving…")
           }
         }
       }
@@ -399,16 +401,11 @@ internal fun BackendInvestigationPanel(
         Text(
             text = message,
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = MaterialTheme.colorScheme.primary,
         )
       }
 
       if (uiState.trustDecision != null && onReturnToProject != null) {
-        Text(
-            text = "Investigation saved to ${sourceProjectName ?: "your Project"}. Return to review any suggested Project changes.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
         Button(onClick = onReturnToProject, modifier = Modifier.fillMaxWidth()) {
           Text("Return to ${sourceProjectName ?: "Project"}")
         }

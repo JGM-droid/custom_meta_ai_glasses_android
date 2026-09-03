@@ -254,16 +254,19 @@ internal class InvestigationSessionDebugViewModel(
                     continuationSessionId = followUpId,
                     trustDecision = decision,
                     trustStatus = response.status,
-                    trustMessage = "More evidence requested. Capture another view for this Project.",
+                    trustMessage = "Got it - capture another view or add more context.",
                 )
               }
             } else {
+              // User-facing copy only - simplified per the glasses<->phone trust UX pass (no
+              // "working hypothesis"/"apply to project" phrasing in the normal flow). The
+              // underlying decision/status this records is unchanged - see BackendTrustDecision
+              // and response.status/checkpointProposalStatus, both still available via this
+              // screen's own "Technical details" toggle for anyone who needs them.
               val message =
                   when (decision) {
-                    BackendTrustDecision.CONTINUE ->
-                        "Saved as a working hypothesis. Proposal status: ${response.checkpointProposalStatus ?: "pending"}; Project review is still required."
-                    BackendTrustDecision.DISAGREE ->
-                        "Disagreement saved. The original AI result remains unchanged."
+                    BackendTrustDecision.CONTINUE -> "Saved to this Project."
+                    BackendTrustDecision.DISAGREE -> "Got it - noted."
                     BackendTrustDecision.MORE_EVIDENCE -> error("handled above")
                   }
               _uiState.update {

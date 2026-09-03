@@ -383,10 +383,18 @@ internal class ProjectContinuityHudController(
    * automatically). The hypothesis is labeled clearly unconfirmed AI output, never canonical
    * Project truth, matching the same honesty convention
    * [ProjectContinuityHudStateMachine.mapOverview] already uses for latestGuidance - only the
-   * wording here is friendlier, not the distinction itself. The three button labels below
-   * (KEEP_AS_HYPOTHESIS/ADD_EVIDENCE/RETURN) are human-facing rewording only - see
-   * [ProjectHudTrustAction]'s doc: the enum names, dispatch routing, and backend
-   * BackendTrustDecision mapping are all unchanged.
+   * wording here is friendlier, not the distinction itself.
+   *
+   * The third action reads "Not quite" (matching BackendInvestigationPanel's own label for the
+   * same disagreement/revision concept - see the trust UX simplification pass) and dispatches a
+   * plain phone handoff ([dispatchPhone]) rather than [ProjectHudTrustAction.RETURN]/
+   * BackendTrustDecision.DISAGREE directly - the glasses have no text input to correct or add
+   * context with (see [dispatchPhone]'s own doc), so routing to the phone's existing "Not quite"
+   * flow (which DOES let the user type a correction) is the smallest way to make this action
+   * actually do what it says, rather than silently recording a decision with nothing to say about
+   * it. RETURN's own dispatch routing and backend DISAGREE mapping are entirely unchanged and
+   * still reachable - this screen simply never surfaces a button that submits it directly.
+   * KEEP_AS_HYPOTHESIS/ADD_EVIDENCE are unchanged, both label and routing.
    */
   private fun ContentScope.trustReviewScreen(
       projectName: String,
@@ -408,7 +416,7 @@ internal class ProjectContinuityHudController(
       } else {
         button("Looks right", onClick = { dispatchTrustDecision(generation, ProjectHudTrustAction.KEEP_AS_HYPOTHESIS) })
         button("Add more info", onClick = { dispatchTrustDecision(generation, ProjectHudTrustAction.ADD_EVIDENCE) })
-        button("Go back", style = ButtonStyle.SECONDARY, onClick = { dispatchTrustDecision(generation, ProjectHudTrustAction.RETURN) })
+        button("Not quite", style = ButtonStyle.SECONDARY, onClick = { dispatchPhone(generation) })
       }
     }
   }
@@ -461,6 +469,14 @@ internal class ProjectContinuityHudController(
       text(short(content.whereWeLeftOff ?: "Nothing recorded yet."), style = TextStyle.BODY)
       text("NEXT", style = TextStyle.META, color = TextColor.SECONDARY)
       text(short(content.nextAction ?: "Choose the next action on your phone."), style = TextStyle.BODY)
+      // The bounded Project Navigator's own concise cut of the same latestGuidance details()
+      // shows in full - re-orienting after a completed-and-decided analysis is exactly what
+      // "quickly understand where I left off" requires, without this becoming a full Project
+      // Detail dump (see details() below for the fuller RECENT EVIDENCE + LATEST GUIDANCE pair).
+      content.latestGuidance?.let {
+        text("LATEST GUIDANCE", style = TextStyle.META, color = TextColor.SECONDARY)
+        text(short(it), style = TextStyle.BODY)
+      }
       content.attentionSummary?.let {
         flexBox(padding = 12, background = FlexBoxBackground.CARD) {
           text("NEEDS ATTENTION", style = TextStyle.META)

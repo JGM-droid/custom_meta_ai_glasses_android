@@ -244,6 +244,10 @@ fun ProjectDetailScreen(
             continuationSessionId = investigationContinuationSessionId,
             focusActiveInvestigation = focusActiveInvestigation,
             onResumeOnGlasses = { sessionId -> onResumeInvestigation(project, sessionId) },
+            // "Looks right"/"Not quite" only ever change the CANONICAL Project's latestInvestigation
+            // (SavedInvestigationSection below reads it) - reload so returning from the sheet shows
+            // it fresh rather than whatever this screen's own overview fetch last saw.
+            onInvestigationDecided = viewModel::loadOverview,
         )
 
         if (overview.pendingProposals.isNotEmpty()) {
@@ -332,6 +336,7 @@ private fun ContinueInvestigationSection(
     continuationSessionId: String?,
     focusActiveInvestigation: Boolean,
     onResumeOnGlasses: (String?) -> Unit,
+    onInvestigationDecided: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
   val application = LocalContext.current.applicationContext as Application
@@ -373,6 +378,14 @@ private fun ContinueInvestigationSection(
             viewModel = investigationViewModel,
             sourceProjectName = project.name,
             onCaptureAnotherView = null,
+            // "Immediate visible confirmation... return to the normal Project/Project Navigator
+            // flow" (glasses<->phone UX simplification): closes this sheet back onto the plain
+            // Project Detail page underneath, after reloading it so the just-decided result is
+            // actually visible there, not stale.
+            onReturnToProject = {
+              isPanelVisible = false
+              onInvestigationDecided()
+            },
         )
         val productState = remember(investigationUiState) { deriveInvestigationProductState(investigationUiState) }
         if (productState.canAnalyze) {
@@ -442,11 +455,14 @@ private fun SavedInvestigationSection(
   }
 }
 
+// Same simple terminology as the trust action itself, wherever it's shown - see
+// BackendInvestigationPanel's/ProjectContinuityHudController's own "Looks right"/"Add more
+// info"/"Not quite" labels for the glasses<->phone trust UX simplification pass.
 internal fun trustDecisionLabel(decision: String?): String =
     when (decision) {
-      "continue" -> "Kept as working hypothesis"
-      "disagree" -> "You disagreed"
-      "more_evidence" -> "More evidence requested"
+      "continue" -> "Looks right"
+      "disagree" -> "Not quite"
+      "more_evidence" -> "Add more info"
       else -> "Not decided"
     }
 
