@@ -90,6 +90,29 @@ internal data class ProjectHudLoadRequest(
 )
 
 /**
+ * Transient, presentation-only status for a HUD-triggered capture request. Independent of
+ * [ProjectHudUiState] because a capture attempt overlays the current Ready/Stale content rather
+ * than replacing it - the last loaded Project summary must stay visible while capture is in
+ * flight or has just failed. Never retried automatically: [Failed] only ever clears through a new
+ * explicit user tap (see [ProjectContinuityHudStateMachine.acceptCapture]).
+ */
+internal sealed interface ProjectHudCaptureStatus {
+  data object Idle : ProjectHudCaptureStatus
+
+  data object Capturing : ProjectHudCaptureStatus
+
+  /**
+   * A photo was captured and is held pending on the phone (not yet appended to Investigation
+   * evidence - see [ProjectContinuityHudController]'s onUseRequested doc). Resolves only through
+   * an explicit user tap: [ProjectContinuityHudStateMachine.acceptUse] or
+   * [ProjectContinuityHudStateMachine.acceptRetake].
+   */
+  data object AwaitingConfirmation : ProjectHudCaptureStatus
+
+  data class Failed(val message: String) : ProjectHudCaptureStatus
+}
+
+/**
  * Pure state machine for the read-only HUD. It owns no Project persistence and performs no
  * network or DAT calls, which makes identity/race/callback behavior deterministic to test.
  */
@@ -98,6 +121,9 @@ internal class ProjectContinuityHudStateMachine {
     private set
 
   var renderGeneration: Long = 0
+    private set
+
+  var captureStatus: ProjectHudCaptureStatus = ProjectHudCaptureStatus.Idle
     private set
 
   private var selectedProjectId: String? = null
@@ -111,6 +137,9 @@ internal class ProjectContinuityHudStateMachine {
     if (selectedProjectId != projectId) lastReadyContent = null
     selectedProjectId = projectId
     selectedProjectName = projectName
+    // A newly selected explicit Project can never inherit a capture status left over from
+    // whichever Project (or no Project) the HUD was previously attached to.
+    captureStatus = ProjectHudCaptureStatus.Idle
     uiState = ProjectHudUiState.Loading(projectId, projectName)
     advanceRender()
     return nextRequest(projectId, projectName)
@@ -160,6 +189,10 @@ internal class ProjectContinuityHudStateMachine {
   fun disconnected() {
     val projectId = selectedProjectId ?: return
     val projectName = selectedProjectName ?: return
+    // Whatever capture was in flight (or had just failed) belonged to the connection that just
+    // dropped - reconnecting must not resurrect a stale "Capturing..."/failure banner nothing
+    // will ever resolve.
+    captureStatus = ProjectHudCaptureStatus.Idle
     uiState = ProjectHudUiState.Disconnected(projectId, projectName)
     advanceRender()
   }
@@ -197,6 +230,82 @@ internal class ProjectContinuityHudStateMachine {
   fun acceptRefresh(generation: Long): ProjectHudLoadRequest? {
     if (!acceptAction(generation, "refresh")) return null
     return refresh()
+  }
+
+  /**
+   * Accepts one HUD-triggered capture tap. Duplicate-press safe the same way [acceptAction]
+   * already guards Refresh/Details/Back: a second tap at the same [generation], or any tap while
+   * a capture is already in flight, is ignored rather than queued. Returns false in either case
+   * so the controller performs no side effect.
+   */
+  fun acceptCapture(generation: Long): Boolean {
+    if (!acceptAction(generation, "capture")) return false
+    if (captureStatus == ProjectHudCaptureStatus.Capturing) return false
+    captureStatus = ProjectHudCaptureStatus.Capturing
+    advanceRender()
+    return true
+  }
+
+  /**
+   * Called once the in-flight capture this HUD requested has completed successfully. Moves to
+   * [ProjectHudCaptureStatus.AwaitingConfirmation] rather than back to Idle - the captured photo
+   * stays pending until the user explicitly taps Use or Retake (see those methods below).
+   */
+  fun captureSucceeded(): Boolean {
+    if (captureStatus !is ProjectHudCaptureStatus.Capturing) return false
+    captureStatus = ProjectHudCaptureStatus.AwaitingConfirmation
+    advanceRender()
+    return true
+  }
+
+  /**
+   * Called when either the capture itself failed, or a confirmed Use could not be applied (e.g.
+   * the Investigation's 5-photo capacity filled between capture and Use). Surfaces the failure
+   * honestly next to the existing content rather than retrying automatically - the user must tap
+   * Capture again (a fresh [acceptCapture] at the new render generation) to retry.
+   */
+  fun captureFailed(message: String): Boolean {
+    if (captureStatus !is ProjectHudCaptureStatus.Capturing &&
+        captureStatus !is ProjectHudCaptureStatus.AwaitingConfirmation
+    ) {
+      return false
+    }
+    captureStatus = ProjectHudCaptureStatus.Failed(message.ifBlank { "Capture failed." })
+    advanceRender()
+    return true
+  }
+
+  /**
+   * Accepts one Use tap while a captured photo is pending confirmation. Duplicate-press safe like
+   * [acceptCapture]. Deliberately does not change [captureStatus] itself - appending the pending
+   * photo to Investigation evidence is a local operation the session owner performs (see
+   * [ProjectContinuityHudController]'s onUseRequested), which then reports back through
+   * [captureAccepted] or [captureFailed].
+   */
+  fun acceptUse(generation: Long): Boolean {
+    if (!acceptAction(generation, "use")) return false
+    return captureStatus is ProjectHudCaptureStatus.AwaitingConfirmation
+  }
+
+  /** Called once the pending photo this HUD's Use tap requested has been added as evidence. */
+  fun captureAccepted(): Boolean {
+    if (captureStatus !is ProjectHudCaptureStatus.AwaitingConfirmation) return false
+    captureStatus = ProjectHudCaptureStatus.Idle
+    advanceRender()
+    return true
+  }
+
+  /**
+   * Accepts one Retake tap while a captured photo is pending confirmation. Unlike Use, discarding
+   * a pending photo is purely local and cannot fail - it moves straight back to Idle so the
+   * Capture action is immediately available again, with no evidence slot consumed.
+   */
+  fun acceptRetake(generation: Long): Boolean {
+    if (!acceptAction(generation, "retake")) return false
+    if (captureStatus !is ProjectHudCaptureStatus.AwaitingConfirmation) return false
+    captureStatus = ProjectHudCaptureStatus.Idle
+    advanceRender()
+    return true
   }
 
   fun phoneActionLabel(): String =

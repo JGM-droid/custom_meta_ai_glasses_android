@@ -226,6 +226,223 @@ class ProjectContinuityHudStateTest {
     assertTrue(state.uiState is ProjectHudUiState.Stale)
   }
 
+  @Test
+  fun captureTapMovesToCapturingAndIgnoresADuplicateTapAtTheSameGeneration() {
+    val state = loadedState()
+    val generation = state.renderGeneration
+
+    assertTrue(state.acceptCapture(generation))
+    assertEquals(ProjectHudCaptureStatus.Capturing, state.captureStatus)
+    // A second tap before the result comes back - whether it's the same render generation (stale
+    // button reference) or the still-Capturing status itself - must never queue a second request.
+    assertFalse(state.acceptCapture(generation))
+    assertFalse(state.acceptCapture(state.renderGeneration))
+    assertEquals(ProjectHudCaptureStatus.Capturing, state.captureStatus)
+  }
+
+  @Test
+  fun captureSuccessAwaitsConfirmationRatherThanReturningStraightToIdle() {
+    val state = loadedState()
+    val generation = state.renderGeneration
+    state.acceptCapture(generation)
+
+    assertTrue(state.captureSucceeded())
+
+    // The photo must stay pending - not silently usable, and not silently discarded - until an
+    // explicit Use or Retake tap resolves it.
+    assertEquals(ProjectHudCaptureStatus.AwaitingConfirmation, state.captureStatus)
+  }
+
+  @Test
+  fun captureFailureIsShownHonestlyAndOnlyClearsOnAnExplicitRetryTap() {
+    val state = loadedState()
+    val generation = state.renderGeneration
+    state.acceptCapture(generation)
+
+    assertTrue(state.captureFailed("No active stream is available for capture."))
+    val failed = state.captureStatus as ProjectHudCaptureStatus.Failed
+    assertEquals("No active stream is available for capture.", failed.message)
+
+    // The failure must never clear itself - only a new explicit tap (a fresh acceptCapture at the
+    // new generation the failure's own render advanced to) moves off Failed.
+    assertEquals(ProjectHudCaptureStatus.Failed(failed.message), state.captureStatus)
+    assertTrue(state.acceptCapture(state.renderGeneration))
+    assertEquals(ProjectHudCaptureStatus.Capturing, state.captureStatus)
+  }
+
+  @Test
+  fun captureResultCallbacksAreIgnoredWhenNothingIsInFlight() {
+    val state = loadedState()
+
+    // A late/stray success or failure callback with nothing Capturing/AwaitingConfirmation (e.g.
+    // it arrived after the HUD had already moved on) must not corrupt the current status.
+    assertFalse(state.captureSucceeded())
+    assertFalse(state.captureFailed("late error"))
+    assertEquals(ProjectHudCaptureStatus.Idle, state.captureStatus)
+  }
+
+  @Test
+  fun useTapIsAcceptedWhileAwaitingConfirmationAndIsDuplicatePressSafe() {
+    val state = loadedState()
+    state.acceptCapture(state.renderGeneration)
+    state.captureSucceeded()
+    val generation = state.renderGeneration
+
+    // acceptUse deliberately does not change captureStatus itself (see its doc) - the owner
+    // performs the real append and reports back via captureAccepted/captureFailed.
+    assertTrue(state.acceptUse(generation))
+    assertEquals(ProjectHudCaptureStatus.AwaitingConfirmation, state.captureStatus)
+
+    // A second Use tap at the same generation - e.g. a stale button reference - must not queue a
+    // second append.
+    assertFalse(state.acceptUse(generation))
+  }
+
+  @Test
+  fun useIsRejectedWhenNothingIsAwaitingConfirmation() {
+    val state = loadedState()
+
+    assertFalse(state.acceptUse(state.renderGeneration))
+  }
+
+  @Test
+  fun useAcceptedReturnsToIdleReadyForAnotherCapture() {
+    val state = loadedState()
+    state.acceptCapture(state.renderGeneration)
+    state.captureSucceeded()
+    state.acceptUse(state.renderGeneration)
+
+    assertTrue(state.captureAccepted())
+    assertEquals(ProjectHudCaptureStatus.Idle, state.captureStatus)
+
+    // Capture is immediately available again - a real slot check happens where the evidence slots
+    // actually live (InvestigationSessionDebugViewModel), not in this HUD state machine.
+    assertTrue(state.acceptCapture(state.renderGeneration))
+  }
+
+  @Test
+  fun useFailureUsesTheSameHonestFailedPresentationAsACaptureFailure() {
+    val state = loadedState()
+    state.acceptCapture(state.renderGeneration)
+    state.captureSucceeded()
+    state.acceptUse(state.renderGeneration)
+
+    // e.g. the Investigation's 5-photo capacity filled between capture and Use.
+    assertTrue(state.captureFailed("Investigation full. 5 photos added."))
+
+    val failed = state.captureStatus as ProjectHudCaptureStatus.Failed
+    assertEquals("Investigation full. 5 photos added.", failed.message)
+  }
+
+  @Test
+  fun captureAcceptedIsIgnoredWhenNothingIsAwaitingConfirmation() {
+    val state = loadedState()
+
+    assertFalse(state.captureAccepted())
+    assertEquals(ProjectHudCaptureStatus.Idle, state.captureStatus)
+  }
+
+  @Test
+  fun retakeDiscardsThePendingPhotoAndReturnsImmediatelyToCapture() {
+    val state = loadedState()
+    state.acceptCapture(state.renderGeneration)
+    state.captureSucceeded()
+    val generation = state.renderGeneration
+
+    assertTrue(state.acceptRetake(generation))
+    // Unlike Use, Retake resolves synchronously - it can never fail, so there is no owner
+    // round-trip and no separate "retake accepted" callback.
+    assertEquals(ProjectHudCaptureStatus.Idle, state.captureStatus)
+    assertTrue(state.acceptCapture(state.renderGeneration))
+  }
+
+  @Test
+  fun retakeIsRejectedWhenNothingIsAwaitingConfirmationAndIsDuplicatePressSafe() {
+    val state = loadedState()
+
+    assertFalse(state.acceptRetake(state.renderGeneration))
+
+    state.acceptCapture(state.renderGeneration)
+    state.captureSucceeded()
+    val generation = state.renderGeneration
+    assertTrue(state.acceptRetake(generation))
+    // A second Retake tap at the same (now-stale) generation must not do anything further.
+    assertFalse(state.acceptRetake(generation))
+  }
+
+  @Test
+  fun selectingAProjectResetsAnyLeftoverCaptureStatus() {
+    val state = loadedState()
+    state.acceptCapture(state.renderGeneration)
+    assertEquals(ProjectHudCaptureStatus.Capturing, state.captureStatus)
+
+    state.selectProject(PROJECT_B, "Room Redesign")
+
+    assertEquals(ProjectHudCaptureStatus.Idle, state.captureStatus)
+  }
+
+  @Test
+  fun disconnectingResetsAnyLeftoverCaptureStatus() {
+    val state = loadedState()
+    state.acceptCapture(state.renderGeneration)
+
+    state.disconnected()
+
+    assertEquals(ProjectHudCaptureStatus.Idle, state.captureStatus)
+  }
+
+  @Test
+  fun selectingAProjectResetsAPendingAwaitingConfirmationStatusToo() {
+    val state = loadedState()
+    state.acceptCapture(state.renderGeneration)
+    state.captureSucceeded()
+    assertEquals(ProjectHudCaptureStatus.AwaitingConfirmation, state.captureStatus)
+
+    // A Project switch mid-confirmation must never let the new Project inherit a decision about a
+    // photo captured for the previous one.
+    state.selectProject(PROJECT_B, "Room Redesign")
+
+    assertEquals(ProjectHudCaptureStatus.Idle, state.captureStatus)
+  }
+
+  @Test
+  fun disconnectingResetsAPendingAwaitingConfirmationStatusToo() {
+    val state = loadedState()
+    state.acceptCapture(state.renderGeneration)
+    state.captureSucceeded()
+
+    state.disconnected()
+
+    assertEquals(ProjectHudCaptureStatus.Idle, state.captureStatus)
+  }
+
+  @Test
+  fun staleGenerationFromBeforeARenderFailureStaysRejectedAfterRecovery() {
+    // Models the proven physical bug: Capturing then Failed fire back-to-back, advancing
+    // renderGeneration twice, while a transient DAT Display send failure could leave the glasses
+    // still showing the ORIGINAL pre-tap screen until ProjectContinuityHudController's
+    // render-retry catches the Display up. The fix belongs entirely in getting the Display to
+    // resync to the current generation - this replay-protection check itself must not change.
+    val state = loadedState()
+    val originalGeneration = state.renderGeneration
+
+    state.acceptCapture(originalGeneration)
+    state.captureFailed("Failed to capture photo")
+
+    // Two advanceRender() calls have happened (Capturing, then Failed).
+    assertTrue(state.renderGeneration > originalGeneration + 1)
+
+    // A tap carrying the ORIGINAL, pre-capture generation - i.e. from a screen the render-retry
+    // has not yet caught up to - must still be rejected, for every action, not only Capture.
+    assertFalse(state.acceptCapture(originalGeneration))
+    assertNull(state.phoneHandoff(originalGeneration))
+    assertNull(state.acceptRefresh(originalGeneration))
+
+    // The CURRENT generation - what the render-retry will actually deliver to the glasses - must
+    // keep working normally.
+    assertTrue(state.acceptCapture(state.renderGeneration))
+  }
+
   private fun loadedState(proposalCount: Int = 0): ProjectContinuityHudStateMachine =
       ProjectContinuityHudStateMachine().also { state ->
         val request = state.selectProject(PROJECT_A, "AC Repair")

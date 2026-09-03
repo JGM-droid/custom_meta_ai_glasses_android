@@ -101,6 +101,7 @@ internal fun StreamScreen(
 ) {
   val streamUiState by streamViewModel.uiState.collectAsStateWithLifecycle()
   val projectHudPhoneHandoff by streamViewModel.projectHudPhoneHandoff.collectAsStateWithLifecycle()
+  val hudCaptureAcceptRequest by streamViewModel.hudCaptureAcceptRequest.collectAsStateWithLifecycle()
   val investigationUiState by investigationViewModel.uiState.collectAsStateWithLifecycle()
   val showInvestigationReopenAffordance =
       remember(streamUiState.isInvestigationPanelVisible, streamUiState.isShareDialogVisible, investigationUiState) {
@@ -137,6 +138,17 @@ internal fun StreamScreen(
         )
       }
       streamViewModel.consumeProjectHudPhoneHandoff(handoff)
+    }
+  }
+
+  LaunchedEffect(hudCaptureAcceptRequest) {
+    // The one place both ViewModels are in scope together - see StreamViewModel's doc on
+    // onHudUseRequested/onHudCaptureAccepted. Purely local (InvestigationSessionDebugViewModel's
+    // evidence slots are in-memory Compose state; no backend call happens here), so this is a
+    // synchronous hand-off, not a network round trip.
+    hudCaptureAcceptRequest?.let { evidence ->
+      val appended = investigationViewModel.appendLiveEvidence(evidence)
+      streamViewModel.onHudCaptureAccepted(appended)
     }
   }
 

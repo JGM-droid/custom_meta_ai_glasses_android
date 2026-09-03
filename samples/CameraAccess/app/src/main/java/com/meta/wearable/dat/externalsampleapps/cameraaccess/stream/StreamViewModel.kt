@@ -94,12 +94,22 @@ internal class StreamViewModel(
   private val _projectHudPhoneHandoff = MutableStateFlow<ProjectHudPhoneHandoff?>(null)
   val projectHudPhoneHandoff: StateFlow<ProjectHudPhoneHandoff?> =
       _projectHudPhoneHandoff.asStateFlow()
+  // A HUD-confirmed (Use-tapped) pending capture, waiting for the Compose layer to append it to
+  // Investigation evidence - see class doc on onHudUseRequested(). Mirrors projectHudPhoneHandoff's
+  // shape: StreamScreen is the only place both this ViewModel and InvestigationSessionDebugViewModel
+  // are in scope together, so the actual append has to happen there.
+  private val _hudCaptureAcceptRequest = MutableStateFlow<InvestigationEvidenceInput?>(null)
+  val hudCaptureAcceptRequest: StateFlow<InvestigationEvidenceInput?> =
+      _hudCaptureAcceptRequest.asStateFlow()
   private val projectHudController =
       ProjectContinuityHudController(
           scope = viewModelScope,
           repository = HttpUrlProjectRepository(),
           onPhoneHandoff = { _projectHudPhoneHandoff.value = it },
           onDisplayError = wearablesViewModel::setRecentError,
+          onCaptureRequested = { onHudCaptureRequested() },
+          onUseRequested = { onHudUseRequested() },
+          onRetakeRequested = { onHudRetakeRequested() },
       )
   private var projectHudProjectId: String? = null
 
@@ -333,10 +343,18 @@ internal class StreamViewModel(
     wearablesViewModel.navigateToDeviceSelection()
   }
 
-  fun capturePhoto() {
+  /**
+   * @param onResult Reports whether this specific capture attempt succeeded, and its failure
+   *   message if not. Optional and unused by the phone Capture button (which already observes
+   *   [uiState]'s isCapturing/captureErrorMessage/capturedPhoto directly) - it exists so the HUD
+   *   Capture button (see [ProjectContinuityHudController.onCaptureSucceeded]/[onCaptureFailed])
+   *   can show its own honest, non-retrying success/failure state without polling [uiState].
+   */
+  fun capturePhoto(onResult: ((success: Boolean, message: String?) -> Unit)? = null) {
     if (uiState.value.isCapturing) {
       Log.d(TAG, "Photo capture already in progress, ignoring request")
       _uiState.update { it.copy(captureErrorMessage = "Capture already in progress.") }
+      onResult?.invoke(false, "Capture already in progress.")
       return
     }
 
@@ -346,6 +364,7 @@ internal class StreamViewModel(
           "Cannot capture photo: stream not active (state=${uiState.value.streamState})",
       )
       _uiState.update { it.copy(captureErrorMessage = "Start the live stream before capturing a still image.") }
+      onResult?.invoke(false, "Start the live stream before capturing a still image.")
       return
     }
 
@@ -370,15 +389,18 @@ internal class StreamViewModel(
                   captureErrorMessage = null,
               )
             }
+            onResult?.invoke(true, null)
           }
           ?.onFailure { error, _ ->
             Log.e(TAG, "Photo capture failed: ${error.description}")
+            val message = error.getLocalizedDescription(getApplication())
             _uiState.update {
               it.copy(
                   isCapturing = false,
-                  captureErrorMessage = error.getLocalizedDescription(getApplication()),
+                  captureErrorMessage = message,
               )
             }
+            onResult?.invoke(false, message)
           }
           ?: run {
             _uiState.update {
@@ -387,7 +409,85 @@ internal class StreamViewModel(
                   captureErrorMessage = "No active stream is available for capture.",
               )
             }
+            onResult?.invoke(false, "No active stream is available for capture.")
           }
+    }
+  }
+
+  /**
+   * Wires the HUD's Capture button to this exact same capturePhoto() the phone Capture button
+   * uses - see [projectHudController]'s onCaptureRequested. Project attribution needs no separate
+   * handling here: [projectHudController] only offers a Capture action once it has attached to
+   * THIS explicit Project's session (see configureProjectHud/attachTo), and this call captures
+   * through that same already-attributed session/stream - there is no second capture path to keep
+   * in sync.
+   */
+  private fun onHudCaptureRequested() {
+    capturePhoto { success, message ->
+      if (success) {
+        projectHudController.onCaptureSucceeded()
+      } else {
+        projectHudController.onCaptureFailed(message ?: "Capture failed.")
+      }
+    }
+  }
+
+  /**
+   * Fired by [projectHudController] when the user taps Use on a pending HUD capture. The pending
+   * photo is exactly [StreamUiState.capturedInvestigationEvidence] - the same field a phone-side
+   * capture already populates and leaves un-appended until something explicitly accepts it (see
+   * BackendInvestigationPanel's prefillLiveEvidence handling in StreamScreen.kt). This only stages
+   * the request; [hudCaptureAcceptRequest] is consumed by StreamScreen, which is the one place
+   * both this ViewModel and the InvestigationSessionDebugViewModel that owns the actual evidence
+   * slots are in scope together - see [onHudCaptureAccepted].
+   */
+  private fun onHudUseRequested() {
+    val pending = uiState.value.capturedInvestigationEvidence
+    if (pending == null) {
+      // Defensive only: the HUD only offers Use while it holds AwaitingConfirmation status, which
+      // is only reached right after a successful capture populated this field.
+      projectHudController.onCaptureFailed("Nothing pending to use.")
+      return
+    }
+    _hudCaptureAcceptRequest.value = pending
+  }
+
+  /**
+   * Called by StreamScreen once it has attempted to append [hudCaptureAcceptRequest]'s evidence
+   * via the Investigation ViewModel's own live-evidence-append call - the only local mutation Use
+   * performs (no backend upload; the eventual submitInvestigation() batch call is unchanged).
+   * [appended] is that call's own return value: false only in the rare case capacity filled
+   * between capture and Use, never from a network condition.
+   */
+  fun onHudCaptureAccepted(appended: Boolean) {
+    _hudCaptureAcceptRequest.value = null
+    _uiState.update {
+      it.copy(
+          capturedInvestigationEvidence = null,
+          capturedPhoto = null,
+          isShareDialogVisible = false,
+      )
+    }
+    if (appended) {
+      projectHudController.onCaptureAccepted()
+    } else {
+      projectHudController.onCaptureFailed("Investigation full. 5 photos added.")
+    }
+  }
+
+  /**
+   * Fired by [projectHudController] when the user taps Retake. Discards the pending photo - never
+   * appended, so no evidence slot is ever consumed - and clears any phone-side preview state
+   * (e.g. a SharePhotoDialog) left over from the same capture so it can't confuse the user after
+   * they've already discarded it from the glasses.
+   */
+  private fun onHudRetakeRequested() {
+    _uiState.update {
+      it.copy(
+          capturedInvestigationEvidence = null,
+          capturedPhoto = null,
+          isShareDialogVisible = false,
+      )
     }
   }
 
