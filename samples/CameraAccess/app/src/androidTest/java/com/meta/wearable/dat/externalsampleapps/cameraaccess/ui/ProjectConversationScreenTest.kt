@@ -28,10 +28,12 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.Conversati
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationTurn
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationTurnStatus
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.MockProjectRepository
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationVisualArtifactReference
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectConversation
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectConversationViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectRepository
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.VisualArtifactImages
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -161,7 +163,7 @@ class ProjectConversationScreenTest {
     compose.waitUntil(10_000) { viewModel.state.value.turns.size == 2 }
 
     val thumbnailTag = "conversation_evidence_thumbnail_${reference.evidenceId}"
-    compose.waitUntil(10_000) { viewModel.evidenceImages.value.values.any { it is ConversationImageUiState.Ready } }
+    compose.waitUntil(10_000) { viewModel.turnImages.value.values.any { it is ConversationImageUiState.Ready } }
     compose.onNodeWithTag(thumbnailTag).assertExists().performClick()
     compose.onNodeWithTag("conversation_evidence_viewer").assertExists()
 
@@ -262,10 +264,139 @@ class ProjectConversationScreenTest {
     viewModel.updateDraft("Broken photo")
     viewModel.send()
     compose.waitUntil(10_000) { viewModel.state.value.turns.size == 2 }
-    compose.waitUntil(10_000) { viewModel.evidenceImages.value.values.any { it is ConversationImageUiState.Failed } }
+    compose.waitUntil(10_000) { viewModel.turnImages.value.values.any { it is ConversationImageUiState.Failed } }
 
     compose.onNodeWithTag("conversation_evidence_thumbnail_${reference.evidenceId}").assertExists()
     compose.onNodeWithTag("conversation_timeline").assertExists()
+  }
+
+  // --- Phase 3B: AI-generated Visualization rendering in conversation ---
+
+  private fun visualArtifactConversation(
+      projectId: String, artifactRef: ConversationVisualArtifactReference,
+  ) = ProjectConversation(
+      conversationId = "conversation-visual-$projectId",
+      projectId = projectId,
+      turns = listOf(
+          ConversationTurn(
+              turnId = "turn-visual-user",
+              projectId = projectId,
+              sequenceNumber = 1,
+              role = ConversationRole.USER,
+              status = ConversationTurnStatus.COMPLETED,
+              text = "I like option 3. Show me what that would look like in my room.",
+              evidenceRefs = emptyList(),
+              idempotencyKey = "visual-key",
+          ),
+          ConversationTurn(
+              turnId = "turn-visual-assistant",
+              projectId = projectId,
+              sequenceNumber = 2,
+              role = ConversationRole.ASSISTANT,
+              status = ConversationTurnStatus.COMPLETED,
+              text = "Here's a visualization of option 3.",
+              evidenceRefs = emptyList(),
+              idempotencyKey = "visual-key",
+              visualArtifactRef = artifactRef,
+          ),
+      ),
+  )
+
+  @Test
+  fun assistantTurnWithVisualArtifactReferenceRendersLabeledThumbnailAndOpensViewerThenReturnsToConversation() {
+    val artifactRef = ConversationVisualArtifactReference("result-1", "option-3", "artifact-1")
+    val conversation = visualArtifactConversation(project.projectId, artifactRef)
+    val repository = PreloadedConversationRepository(
+        conversation, imagesByEvidenceId = emptyMap(),
+        visualizationsByArtifactId = mapOf(artifactRef.artifactId to fakePngBytes()),
+    )
+    val viewModel = ProjectConversationViewModel(application, project.projectId, repository)
+    setContent(viewModel)
+    compose.waitUntil(10_000) { viewModel.state.value.turns.size == 2 }
+
+    // Labeled distinctly from a Source Evidence thumbnail - never presented as if it were the
+    // original photo.
+    compose.onNodeWithText("AI visualization").assertExists()
+    val thumbnailTag = "conversation_visual_artifact_thumbnail_${artifactRef.artifactId}"
+    compose.waitUntil(10_000) { viewModel.turnImages.value.values.any { it is ConversationImageUiState.Ready } }
+    compose.onNodeWithTag(thumbnailTag).assertExists().performClick()
+    compose.onNodeWithTag("conversation_evidence_viewer").assertExists()
+
+    compose.onNodeWithTag("conversation_evidence_viewer_close").performClick()
+    compose.onNodeWithTag("conversation_evidence_viewer").assertDoesNotExist()
+    compose.onNodeWithTag("conversation_timeline").assertExists()
+    compose.onNodeWithTag(thumbnailTag).assertExists()
+  }
+
+  @Test
+  fun visualArtifactThumbnailSurvivesReloadFromPersistedTurnDataAlone() {
+    val artifactRef = ConversationVisualArtifactReference("result-2", "option-1", "artifact-reload-1")
+    val conversation = visualArtifactConversation(project.projectId, artifactRef)
+    val repository = PreloadedConversationRepository(
+        conversation, imagesByEvidenceId = emptyMap(),
+        visualizationsByArtifactId = mapOf(artifactRef.artifactId to fakePngBytes()),
+    )
+    // A brand-new ViewModel with no live generation state of its own - only the persisted
+    // VISUAL_ARTIFACT_REFERENCE it reads back via getProjectConversation.
+    val viewModel = ProjectConversationViewModel(application, project.projectId, repository)
+    setContent(viewModel)
+    compose.waitUntil(10_000) { viewModel.state.value.turns.size == 2 }
+    compose.onNodeWithTag("conversation_visual_artifact_thumbnail_${artifactRef.artifactId}").assertExists()
+  }
+
+  @Test
+  fun sourceEvidenceAndGeneratedVisualizationRemainDistinguishableInTheSameConversation() {
+    val evidenceRef = ConversationEvidenceReference("evidence-source-1", "session-source-1")
+    val artifactRef = ConversationVisualArtifactReference("result-3", "option-2", "artifact-distinct-1")
+    val conversation = ProjectConversation(
+        conversationId = "conversation-distinct",
+        projectId = project.projectId,
+        turns = listOf(
+            ConversationTurn(
+                turnId = "turn-distinct-user",
+                projectId = project.projectId,
+                sequenceNumber = 1,
+                role = ConversationRole.USER,
+                status = ConversationTurnStatus.COMPLETED,
+                text = "Here's my dresser. Give me some ideas.",
+                evidenceRefs = listOf(evidenceRef),
+                idempotencyKey = "distinct-key",
+            ),
+            ConversationTurn(
+                turnId = "turn-distinct-assistant",
+                projectId = project.projectId,
+                sequenceNumber = 2,
+                role = ConversationRole.ASSISTANT,
+                status = ConversationTurnStatus.COMPLETED,
+                text = "Here's a visualization of option 2.",
+                evidenceRefs = emptyList(),
+                idempotencyKey = "distinct-key",
+                visualArtifactRef = artifactRef,
+            ),
+        ),
+    )
+    val repository = PreloadedConversationRepository(
+        conversation,
+        imagesByEvidenceId = mapOf(evidenceRef.evidenceId to fakePngBytes()),
+        visualizationsByArtifactId = mapOf(artifactRef.artifactId to fakePngBytes()),
+    )
+    val viewModel = ProjectConversationViewModel(application, project.projectId, repository)
+    setContent(viewModel)
+    compose.waitUntil(10_000) { viewModel.state.value.turns.size == 2 }
+
+    compose.onNodeWithTag("conversation_evidence_thumbnail_${evidenceRef.evidenceId}").assertExists()
+    compose.onNodeWithTag("conversation_visual_artifact_thumbnail_${artifactRef.artifactId}").assertExists()
+  }
+
+  @Test
+  fun turnWithoutVisualArtifactReferenceNeverRendersTheVisualizationLabel() {
+    val viewModel = ProjectConversationViewModel(application, project.projectId, MockProjectRepository())
+    setContent(viewModel)
+    compose.waitUntil(10_000) { viewModel.state.value.loadState.name == "READY" }
+    viewModel.updateDraft("Just a question, no visualization")
+    viewModel.send()
+    compose.waitUntil(10_000) { viewModel.state.value.turns.size == 2 }
+    compose.onNodeWithText("AI visualization").assertDoesNotExist()
   }
 
   private fun fakePngBytes(): ByteArray {
@@ -296,11 +427,20 @@ class ProjectConversationScreenTest {
   private class PreloadedConversationRepository(
       private val conversation: ProjectConversation,
       private val imagesByEvidenceId: Map<String, ByteArray>,
+      private val visualizationsByArtifactId: Map<String, ByteArray> = emptyMap(),
   ) : ProjectRepository by MockProjectRepository() {
     override suspend fun getProjectConversation(projectId: String) = conversation
 
     override suspend fun getConversationEvidenceImage(projectId: String, reference: ConversationEvidenceReference): ByteArray =
         imagesByEvidenceId[reference.evidenceId] ?: throw NoSuchElementException("No fake image for ${reference.evidenceId}")
+
+    override suspend fun getVisualArtifactImages(
+        projectId: String, resultId: String, optionId: String, artifactId: String,
+    ): VisualArtifactImages = VisualArtifactImages(
+        source = ByteArray(0),
+        visualization = visualizationsByArtifactId[artifactId]
+            ?: throw NoSuchElementException("No fake visualization for $artifactId"),
+    )
   }
 
   /**

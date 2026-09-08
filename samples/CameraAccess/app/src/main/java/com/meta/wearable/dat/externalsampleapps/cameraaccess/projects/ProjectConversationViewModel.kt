@@ -26,11 +26,13 @@ import kotlinx.coroutines.withContext
 internal enum class ConversationLoadState { LOADING, READY, ERROR }
 
 /**
- * Phase 3A closeout: rendering-only cache for Evidence image bytes already resolved via
- * [ProjectConversationViewModel.loadEvidenceImage] - keyed by the same [ConversationEvidenceReference]
- * a persisted turn already carries. This is session-lifetime and reconstructible at any time from
- * the reference; it is never the source of truth for the image (Evidence is) and is never persisted
- * itself - a fresh process simply re-fetches on first render, same as any other remote thumbnail.
+ * Phase 3A/3B: rendering-only cache for image bytes already resolved via
+ * [ProjectConversationViewModel.loadEvidenceImage] or [ProjectConversationViewModel.loadVisualArtifactImage]
+ * - keyed by the same reference a persisted turn already carries (either a Source Evidence
+ * [ConversationEvidenceReference] or a generated [ConversationVisualArtifactReference]). This is
+ * session-lifetime and reconstructible at any time from the reference; it is never the source of
+ * truth for the image (Evidence/VisualArtifactStore are) and is never persisted itself - a fresh
+ * process simply re-fetches on first render, same as any other remote thumbnail.
  */
 internal sealed interface ConversationImageUiState {
   data object Loading : ConversationImageUiState
@@ -39,7 +41,10 @@ internal sealed interface ConversationImageUiState {
 }
 
 internal fun conversationImageCacheKey(reference: ConversationEvidenceReference): String =
-    "${reference.investigationSessionId}:${reference.evidenceId}"
+    "evidence:${reference.investigationSessionId}:${reference.evidenceId}"
+
+internal fun conversationVisualArtifactCacheKey(reference: ConversationVisualArtifactReference): String =
+    "visual-artifact:${reference.artifactId}"
 
 internal data class ConversationAttachmentUiState(
     val uri: String,
@@ -76,8 +81,8 @@ internal class ProjectConversationViewModel(
       },
   ))
   val state: StateFlow<ProjectConversationUiState> = _state.asStateFlow()
-  private val _evidenceImages = MutableStateFlow<Map<String, ConversationImageUiState>>(emptyMap())
-  val evidenceImages: StateFlow<Map<String, ConversationImageUiState>> = _evidenceImages.asStateFlow()
+  private val _turnImages = MutableStateFlow<Map<String, ConversationImageUiState>>(emptyMap())
+  val turnImages: StateFlow<Map<String, ConversationImageUiState>> = _turnImages.asStateFlow()
   private var pendingIdempotencyKey: String? = savedState["conversation_pending_key"]
   private var stagedReference: ConversationEvidenceReference? =
       savedState.get<String>("conversation_evidence_id")?.let { evidenceId ->
@@ -203,15 +208,41 @@ internal class ProjectConversationViewModel(
    */
   fun loadEvidenceImage(reference: ConversationEvidenceReference) {
     val key = conversationImageCacheKey(reference)
-    val existing = _evidenceImages.value[key]
+    val existing = _turnImages.value[key]
     if (existing is ConversationImageUiState.Loading || existing is ConversationImageUiState.Ready) return
-    _evidenceImages.update { it + (key to ConversationImageUiState.Loading) }
+    _turnImages.update { it + (key to ConversationImageUiState.Loading) }
     viewModelScope.launch {
       try {
         val bytes = withContext(Dispatchers.IO) { repository.getConversationEvidenceImage(projectId, reference) }
-        _evidenceImages.update { it + (key to ConversationImageUiState.Ready(bytes)) }
+        _turnImages.update { it + (key to ConversationImageUiState.Ready(bytes)) }
       } catch (error: Exception) {
-        _evidenceImages.update { it + (key to ConversationImageUiState.Failed(safeMessage(error))) }
+        _turnImages.update { it + (key to ConversationImageUiState.Failed(safeMessage(error))) }
+      }
+    }
+  }
+
+  /**
+   * Phase 3B: resolves a persisted turn's [ConversationVisualArtifactReference] to the generated
+   * visualization's image bytes, on demand - reuses the existing VisualArtifact image retrieval
+   * path ([ProjectRepository.getVisualArtifactImages], the same call `VisualArtifactViewModel`
+   * already makes for the Explore panel) rather than a second image-fetch implementation. Only the
+   * `visualization` bytes are cached here; the `source` bytes that same call also returns are
+   * already independently reachable as this conversation's own Source Evidence thumbnail.
+   */
+  fun loadVisualArtifactImage(reference: ConversationVisualArtifactReference) {
+    val key = conversationVisualArtifactCacheKey(reference)
+    val existing = _turnImages.value[key]
+    if (existing is ConversationImageUiState.Loading || existing is ConversationImageUiState.Ready) return
+    _turnImages.update { it + (key to ConversationImageUiState.Loading) }
+    viewModelScope.launch {
+      try {
+        val images = withContext(Dispatchers.IO) {
+          repository.getVisualArtifactImages(
+              projectId, reference.projectAiResultId, reference.optionId, reference.artifactId)
+        }
+        _turnImages.update { it + (key to ConversationImageUiState.Ready(images.visualization)) }
+      } catch (error: Exception) {
+        _turnImages.update { it + (key to ConversationImageUiState.Failed(safeMessage(error))) }
       }
     }
   }

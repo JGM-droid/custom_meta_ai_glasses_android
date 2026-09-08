@@ -78,9 +78,11 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.Conversati
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationLoadState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationRole
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationTurn
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationVisualArtifactReference
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectConversationViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.conversationImageCacheKey
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.conversationVisualArtifactCacheKey
 
 private const val TAG = "CameraAccess:ProjectConversation"
 
@@ -104,7 +106,7 @@ internal fun ProjectConversationScreen(
         ::createInvestigationSpeechRecognizerController,
 ) {
   val state by conversationViewModel.state.collectAsState()
-  val evidenceImages by conversationViewModel.evidenceImages.collectAsState()
+  val turnImages by conversationViewModel.turnImages.collectAsState()
   val context = LocalContext.current
   val listState = rememberLazyListState()
   var priorCount by remember(project.projectId) { mutableIntStateOf(0) }
@@ -270,7 +272,10 @@ internal fun ProjectConversationScreen(
           }
         }
         items(state.turns, key = ConversationTurn::turnId) { turn ->
-          ConversationBubble(turn, evidenceImages, conversationViewModel::loadEvidenceImage)
+          ConversationBubble(
+              turn, turnImages, conversationViewModel::loadEvidenceImage,
+              conversationViewModel::loadVisualArtifactImage,
+          )
         }
         if (state.sending) item(key = "sending") {
           Row(verticalAlignment = Alignment.CenterVertically) {
@@ -286,11 +291,14 @@ internal fun ProjectConversationScreen(
 @Composable
 private fun ConversationBubble(
     turn: ConversationTurn,
-    evidenceImages: Map<String, ConversationImageUiState>,
+    turnImages: Map<String, ConversationImageUiState>,
     onLoadEvidenceImage: (ConversationEvidenceReference) -> Unit,
+    onLoadVisualArtifactImage: (ConversationVisualArtifactReference) -> Unit,
 ) {
   val user = turn.role == ConversationRole.USER
-  var viewerReference by remember(turn.turnId) { mutableStateOf<ConversationEvidenceReference?>(null) }
+  // Addresses whichever thumbnail was tapped by its own cache key - one viewer, shared by both
+  // Source Evidence thumbnails and AI-generated Visualization thumbnails below.
+  var viewerImageKey by remember(turn.turnId) { mutableStateOf<String?>(null) }
   Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
     Column(
         Modifier.widthIn(max = 340.dp)
@@ -306,40 +314,65 @@ private fun ConversationBubble(
                 .testTag("conversation_turn_${turn.sequenceNumber}_images"),
         ) {
           turn.evidenceRefs.forEach { reference ->
-            ConversationEvidenceThumbnail(
-                reference = reference,
-                imageState = evidenceImages[conversationImageCacheKey(reference)],
-                onLoad = onLoadEvidenceImage,
-                onClick = { viewerReference = reference },
+            val key = conversationImageCacheKey(reference)
+            ConversationImageThumbnail(
+                imageState = turnImages[key],
+                contentDescription = "Photo",
+                testTag = "conversation_evidence_thumbnail_${reference.evidenceId}",
+                onLoad = { onLoadEvidenceImage(reference) },
+                onClick = { viewerImageKey = key },
             )
           }
         }
       }
+      // Phase 3B: an AI-generated Visualization is always its own labeled thumbnail, distinct from
+      // any Source Evidence thumbnail above (different turn, different label, different tap
+      // target) - never merged into the same reference or rendered as if it were the source photo.
+      turn.visualArtifactRef?.let { reference ->
+        Text(
+            "AI visualization", fontSize = 12.sp, fontWeight = FontWeight.Bold,
+            color = if (user) AppColor.AccentInk else AppColor.Accent,
+            modifier = Modifier.padding(top = 8.dp, bottom = 6.dp),
+        )
+        val key = conversationVisualArtifactCacheKey(reference)
+        ConversationImageThumbnail(
+            imageState = turnImages[key],
+            contentDescription = "AI visualization",
+            testTag = "conversation_visual_artifact_thumbnail_${reference.artifactId}",
+            onLoad = { onLoadVisualArtifactImage(reference) },
+            onClick = { viewerImageKey = key },
+        )
+      }
     }
   }
-  viewerReference?.let { reference ->
+  viewerImageKey?.let { key ->
     ConversationEvidenceViewerDialog(
-        imageState = evidenceImages[conversationImageCacheKey(reference)],
-        onDismiss = { viewerReference = null },
+        imageState = turnImages[key],
+        onDismiss = { viewerImageKey = null },
     )
   }
 }
 
-/** A single Evidence thumbnail: shows a loading spinner, the decoded image, or a fallback icon. */
+/**
+ * One image thumbnail backed by a [ConversationImageUiState] cache entry - shared rendering for
+ * both a Source Evidence photo and an AI-generated Visualization, which differ only in which
+ * reference resolves the bytes and how the tile is labeled/tagged for tests.
+ */
 @Composable
-private fun ConversationEvidenceThumbnail(
-    reference: ConversationEvidenceReference,
+private fun ConversationImageThumbnail(
     imageState: ConversationImageUiState?,
-    onLoad: (ConversationEvidenceReference) -> Unit,
+    contentDescription: String,
+    testTag: String,
+    onLoad: () -> Unit,
     onClick: () -> Unit,
 ) {
-  LaunchedEffect(reference) { onLoad(reference) }
+  LaunchedEffect(testTag) { onLoad() }
   Box(
       modifier = Modifier.size(88.dp)
           .clip(RoundedCornerShape(10.dp))
           .background(Color(0xFF14171B))
           .let { base -> if (imageState is ConversationImageUiState.Ready) base.clickable(onClick = onClick) else base }
-          .testTag("conversation_evidence_thumbnail_${reference.evidenceId}"),
+          .testTag(testTag),
       contentAlignment = Alignment.Center,
   ) {
     when (imageState) {
@@ -350,16 +383,16 @@ private fun ConversationEvidenceThumbnail(
         if (bitmap != null) {
           Image(
               bitmap = bitmap.asImageBitmap(),
-              contentDescription = "Photo",
+              contentDescription = contentDescription,
               contentScale = ContentScale.Crop,
               modifier = Modifier.fillMaxSize(),
           )
         } else {
-          Icon(Icons.Default.PhotoCamera, contentDescription = "Photo unavailable", tint = AppColor.InkSecondary)
+          Icon(Icons.Default.PhotoCamera, contentDescription = "$contentDescription unavailable", tint = AppColor.InkSecondary)
         }
       }
       is ConversationImageUiState.Failed ->
-        Icon(Icons.Default.PhotoCamera, contentDescription = "Photo unavailable", tint = AppColor.InkSecondary)
+        Icon(Icons.Default.PhotoCamera, contentDescription = "$contentDescription unavailable", tint = AppColor.InkSecondary)
       ConversationImageUiState.Loading, null ->
         CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = AppColor.Accent)
     }

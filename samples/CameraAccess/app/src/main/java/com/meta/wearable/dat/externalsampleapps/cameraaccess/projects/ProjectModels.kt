@@ -172,6 +172,17 @@ data class ConversationEvidenceReference(
     val investigationSessionId: String,
 )
 
+/**
+ * Phase 3B: pointer to a generated VisualArtifact already referenced from an assistant turn -
+ * exactly the same (result_id, option_id, artifact_id) identity the existing VisualArtifact HTTP
+ * routes already use. Never carries image bytes itself.
+ */
+data class ConversationVisualArtifactReference(
+    val projectAiResultId: String,
+    val optionId: String,
+    val artifactId: String,
+)
+
 data class ConversationTurn(
     val turnId: String,
     val projectId: String,
@@ -181,6 +192,7 @@ data class ConversationTurn(
     val text: String,
     val evidenceRefs: List<ConversationEvidenceReference>,
     val idempotencyKey: String,
+    val visualArtifactRef: ConversationVisualArtifactReference? = null,
 )
 
 data class ProjectConversation(
