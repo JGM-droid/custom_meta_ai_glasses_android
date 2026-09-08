@@ -37,6 +37,8 @@
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 
+import android.app.Application
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -54,14 +56,21 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+// Aliased: this file's AppRoot() already has a parameter named `viewModel` (the WearablesViewModel
+// - see below), which would otherwise shadow this composable function of the same name.
+import androidx.lifecycle.viewmodel.compose.viewModel as rememberViewModel
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.display.ProjectHudPhoneDestination
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.stream.StreamViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
+
+private const val TAG = "CameraAccess:AppRoot"
 
 private sealed interface TopLevelScreen {
   data object ProjectsHome : TopLevelScreen
@@ -85,9 +94,19 @@ private sealed interface TopLevelScreen {
 
   data class ProjectWorkspace(val project: ProjectSummary) : TopLevelScreen
 
+  data class ProjectConversation(
+      val project: ProjectSummary,
+      val glassesEvidencePending: Boolean = false,
+      val glassesContinuationSessionId: String? = null,
+  ) : TopLevelScreen
+
   // sourceProject: the explicit Project Capture was entered from (Workspace), or null for the
   // existing global entry point (Projects Home) - see file header.
-  data class Capture(val sourceProject: ProjectSummary? = null, val continuationSessionId: String? = null) : TopLevelScreen
+  data class Capture(
+      val sourceProject: ProjectSummary? = null,
+      val continuationSessionId: String? = null,
+      val returnToConversation: Boolean = false,
+  ) : TopLevelScreen
 }
 
 private val TopLevelScreenSaver = listSaver<TopLevelScreen, String>(
@@ -106,7 +125,22 @@ private val TopLevelScreenSaver = listSaver<TopLevelScreen, String>(
                 screen.activeInvestigationSessionId.orEmpty(),
             )
         is TopLevelScreen.ProjectWorkspace -> listOf("workspace", screen.project.projectId, screen.project.name, screen.project.status)
-        is TopLevelScreen.Capture -> listOf("capture", screen.sourceProject?.projectId.orEmpty(), screen.sourceProject?.name.orEmpty(), screen.sourceProject?.status.orEmpty(), screen.continuationSessionId.orEmpty())
+        is TopLevelScreen.ProjectConversation -> listOf(
+            "conversation",
+            screen.project.projectId,
+            screen.project.name,
+            screen.project.status,
+            screen.glassesEvidencePending.toString(),
+            screen.glassesContinuationSessionId.orEmpty(),
+        )
+        is TopLevelScreen.Capture -> listOf(
+            "capture",
+            screen.sourceProject?.projectId.orEmpty(),
+            screen.sourceProject?.name.orEmpty(),
+            screen.sourceProject?.status.orEmpty(),
+            screen.continuationSessionId.orEmpty(),
+            screen.returnToConversation.toString(),
+        )
       }
     },
     restore = { saved ->
@@ -125,7 +159,18 @@ private val TopLevelScreenSaver = listSaver<TopLevelScreen, String>(
               )
             } ?: TopLevelScreen.ProjectsHome
         "workspace" -> project?.let(TopLevelScreen::ProjectWorkspace) ?: TopLevelScreen.ProjectsHome
-        "capture" -> TopLevelScreen.Capture(project, saved.getOrNull(4)?.takeIf(String::isNotBlank))
+        "conversation" -> project?.let {
+          TopLevelScreen.ProjectConversation(
+              it,
+              glassesEvidencePending = saved.getOrNull(4).toBoolean(),
+              glassesContinuationSessionId = saved.getOrNull(5)?.takeIf(String::isNotBlank),
+          )
+        } ?: TopLevelScreen.ProjectsHome
+        "capture" -> TopLevelScreen.Capture(
+            project,
+            saved.getOrNull(4)?.takeIf(String::isNotBlank),
+            returnToConversation = saved.getOrNull(5).toBoolean(),
+        )
         else -> TopLevelScreen.ProjectsHome
       }
     },
@@ -153,16 +198,21 @@ fun AppRoot(
         TopLevelScreen.NewProject -> true
         is TopLevelScreen.ProjectDetail -> true
         is TopLevelScreen.ProjectWorkspace -> true
+        is TopLevelScreen.ProjectConversation -> true
       }
   BackHandler(enabled = canGoBack) {
     topLevelScreen =
         when (val screen = topLevelScreen) {
           is TopLevelScreen.ProjectWorkspace -> TopLevelScreen.ProjectDetail(screen.project)
+          is TopLevelScreen.ProjectConversation -> TopLevelScreen.ProjectsHome
           // Return toward the same Project context Capture was entered from, where practical
           // (Phase 10) - the unscoped global entry point (sourceProject == null) keeps its
           // existing "back to Projects Home" behavior exactly.
           is TopLevelScreen.Capture ->
-              screen.sourceProject?.let { TopLevelScreen.ProjectDetail(it) } ?: TopLevelScreen.ProjectsHome
+              screen.sourceProject?.let {
+                if (screen.returnToConversation) TopLevelScreen.ProjectConversation(it)
+                else TopLevelScreen.ProjectDetail(it)
+              } ?: TopLevelScreen.ProjectsHome
           else -> TopLevelScreen.ProjectsHome
         }
   }
@@ -175,7 +225,7 @@ fun AppRoot(
             onOpenCapture = { project ->
               topLevelScreen = TopLevelScreen.Capture(sourceProject = project)
             },
-            onOpenProject = { project -> topLevelScreen = TopLevelScreen.ProjectDetail(project) },
+            onOpenProject = { project -> topLevelScreen = TopLevelScreen.ProjectConversation(project) },
             onNewProject = { topLevelScreen = TopLevelScreen.NewProject },
             modifier = modifier,
         )
@@ -214,6 +264,46 @@ fun AppRoot(
             onOpenCapture = { topLevelScreen = TopLevelScreen.Capture(sourceProject = screen.project) },
             modifier = modifier,
         )
+    is TopLevelScreen.ProjectConversation -> {
+      // ADR-061 conversation handoff (Blocker 2): only constructed when there is actually
+      // glasses evidence to adopt this composition - StreamViewModel is Activity-scoped (see its
+      // class doc) and resolves to the SAME instance StreamScreen itself uses (no explicit key on
+      // either side - both rely on the default class-name key), so this never creates a second,
+      // competing instance. Never touched for the common case (opening a conversation with no
+      // pending glasses evidence at all).
+      val application = LocalContext.current.applicationContext as Application
+      val streamViewModel: StreamViewModel? =
+          if (screen.glassesEvidencePending) {
+            rememberViewModel(factory = StreamViewModel.Factory(application, viewModel))
+          } else {
+            null
+          }
+      ProjectConversationScreen(
+          project = screen.project,
+          onBack = { topLevelScreen = TopLevelScreen.ProjectsHome },
+          onProjectDetails = { topLevelScreen = TopLevelScreen.ProjectDetail(screen.project) },
+          onUseGlasses = {
+            Log.d(TAG, "onUseGlasses: entering Capture(returnToConversation=true) for project=${screen.project.projectId}")
+            topLevelScreen = TopLevelScreen.Capture(
+                sourceProject = screen.project,
+                returnToConversation = true,
+            )
+          },
+          glassesConnected = uiState.hasActiveDevice,
+          glassesEvidencePending = screen.glassesEvidencePending,
+          glassesContinuationSessionId = screen.glassesContinuationSessionId,
+          onGlassesEvidenceAdopted = {
+            Log.d(TAG, "onGlassesEvidenceAdopted: evidence adopted into conversation for project=${screen.project.projectId}")
+            // Tells the HUD control has moved to the phone (see StreamViewModel's doc) BEFORE
+            // resetting glassesEvidencePending back to false - a defensive second trigger for the
+            // same neutral handoff dispatchPhone() already renders on a Continue-on-phone tap
+            // (see ProjectContinuityHudController.dispatchPhone's doc), never a replacement for it.
+            streamViewModel?.acknowledgePhoneControl()
+            topLevelScreen = TopLevelScreen.ProjectConversation(screen.project)
+          },
+          modifier = modifier,
+      )
+    }
     TopLevelScreen.NewProject ->
         NewProjectScreen(
             onBack = { topLevelScreen = TopLevelScreen.ProjectsHome },
@@ -221,7 +311,7 @@ fun AppRoot(
             // back to Projects Home first. ProjectsHomeScreen refreshes itself from the backend
             // whenever it re-enters composition, so the new Project appears there too without
             // this screen needing to inject it into any shared/cached list.
-            onCreated = { project -> topLevelScreen = TopLevelScreen.ProjectDetail(project) },
+            onCreated = { project -> topLevelScreen = TopLevelScreen.ProjectConversation(project) },
             modifier = modifier,
         )
     is TopLevelScreen.Capture ->
@@ -232,20 +322,33 @@ fun AppRoot(
               sourceProjectId = screen.sourceProject?.projectId,
               sourceProjectName = screen.sourceProject?.name,
               continuationSessionId = screen.continuationSessionId,
+              returnToConversation = screen.returnToConversation,
               onReturnToSourceProject =
                   screen.sourceProject?.let { project ->
-                    { topLevelScreen = TopLevelScreen.ProjectDetail(project) }
+                    {
+                      topLevelScreen =
+                          if (screen.returnToConversation) TopLevelScreen.ProjectConversation(project)
+                          else TopLevelScreen.ProjectDetail(project)
+                    }
                   },
               onProjectHudPhoneHandoff =
                   screen.sourceProject?.let { project ->
                     { destination, continuationSessionId ->
-                      topLevelScreen =
-                          TopLevelScreen.ProjectDetail(
-                              project,
-                              focusReview = destination == ProjectHudPhoneDestination.PROJECT_REVIEW,
-                              focusActiveInvestigation = destination == ProjectHudPhoneDestination.ACTIVE_INVESTIGATION,
-                              activeInvestigationSessionId = continuationSessionId,
-                          )
+                      Log.d(TAG, "onProjectHudPhoneHandoff: destination=$destination continuationSessionId=$continuationSessionId returnToConversation=${screen.returnToConversation} project=${project.projectId}")
+                      topLevelScreen = if (screen.returnToConversation) {
+                        TopLevelScreen.ProjectConversation(
+                            project,
+                            glassesEvidencePending = true,
+                            glassesContinuationSessionId = continuationSessionId,
+                        )
+                      } else {
+                        TopLevelScreen.ProjectDetail(
+                            project,
+                            focusReview = destination == ProjectHudPhoneDestination.PROJECT_REVIEW,
+                            focusActiveInvestigation = destination == ProjectHudPhoneDestination.ACTIVE_INVESTIGATION,
+                            activeInvestigationSessionId = continuationSessionId,
+                        )
+                      }
                     }
                   },
           )

@@ -54,6 +54,7 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.bitma
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.heicBytesToInvestigationEvidence
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.liveCaptureFilename
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.HttpUrlProjectRepository
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectRepository
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -61,6 +62,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -75,12 +77,23 @@ internal data class HudTrustDecisionRequest(val action: ProjectHudTrustAction, v
 internal class StreamViewModel(
     application: Application,
     private val wearablesViewModel: WearablesViewModel,
+    // Test-only seam (production always uses the default): lets the Phase 2 end-to-end
+    // acceptance harness seed the HUD's canonical Project state (an old Investigation, an
+    // undecided trust result, prior evidence, ...) through the exact same real
+    // ProjectContinuityHudController this class already owns, without hitting a real backend -
+    // see Phase2GlassesConversationAcceptanceTest.kt. Never touched by StreamViewModel.Factory,
+    // which always constructs with the default.
+    projectRepository: ProjectRepository = HttpUrlProjectRepository(),
 ) : AndroidViewModel(application) {
 
   companion object {
     private const val TAG = "CameraAccess:StreamViewModel"
     private val INITIAL_STATE = StreamUiState()
     private val SESSION_TERMINAL_STATES = setOf(StreamState.CLOSED)
+    // See hudUseAcceptTimeoutJob's doc. A live StreamScreen's hand-off is local/synchronous
+    // (milliseconds); this only needs to be comfortably longer than that, not tuned to any
+    // network condition.
+    private const val HUD_USE_ACCEPT_TIMEOUT_MS = 4000L
   }
 
   private val deviceSelector: DeviceSelector = wearablesViewModel.deviceSelector
@@ -93,6 +106,22 @@ internal class StreamViewModel(
   private var stateJob: Job? = null
   private var errorJob: Job? = null
   private var sessionErrorJob: Job? = null
+  // Guards against a permanently-stuck HUD ProjectHudCaptureStatus.AwaitingConfirmation - see
+  // onHudUseRequested()'s doc. hudCaptureAcceptRequest is only ever consumed by a LaunchedEffect
+  // inside StreamScreen's own composition (the one place InvestigationSessionDebugViewModel is
+  // also in scope); the glasses HUD itself stays attached and tappable independent of whatever
+  // the phone screen currently shows (StreamViewModel/projectHudController are Activity-scoped,
+  // not tied to StreamScreen's lifecycle - see class doc), so a Capture->Use cycle completed on
+  // the glasses while the phone has already navigated away from StreamScreen (e.g. after
+  // Continue-on-phone) would otherwise leave this request forever unconsumed and the HUD
+  // permanently rendering its AwaitingConfirmation screen (renderState() unconditionally
+  // prioritizes it) every time the Display re-renders. This timeout is the bounded, honest-failure
+  // fallback for exactly that case - never a retry, never masking the real failure, matching
+  // captureFailed()'s existing "surface honestly, next attempt is always an explicit tap"
+  // convention. A live StreamScreen resolves the SAME request well within this window (the hand-off
+  // is purely local/synchronous - see onHudUseRequested()'s doc), so this never races a genuine
+  // in-progress append.
+  private var hudUseAcceptTimeoutJob: Job? = null
   private var sessionStateJob: Job? = null
   private var stream: Stream? = null
   private var previousDeviceSessionState: DeviceSessionState? = null
@@ -119,7 +148,7 @@ internal class StreamViewModel(
   private val projectHudController =
       ProjectContinuityHudController(
           scope = viewModelScope,
-          repository = HttpUrlProjectRepository(),
+          repository = projectRepository,
           onPhoneHandoff = { _projectHudPhoneHandoff.value = it },
           onDisplayError = wearablesViewModel::setRecentError,
           onCaptureRequested = { onHudCaptureRequested() },
@@ -220,10 +249,6 @@ internal class StreamViewModel(
             return@collect
           }
 
-          if (projectHudProjectId != null) {
-            session?.let(projectHudController::attachTo)
-          }
-
           videoJob?.cancel()
           stateJob?.cancel()
           errorJob?.cancel()
@@ -233,6 +258,11 @@ internal class StreamViewModel(
               ?.addStream(StreamConfiguration(videoQuality = VideoQuality.MEDIUM, frameRate = 24))
               ?.onSuccess { addedStream ->
                 stream = addedStream
+                // Add both capabilities serially on the one DeviceSession. The physical DAT
+                // session can reject the first HUD update when addDisplay and addStream overlap.
+                if (projectHudProjectId != null) {
+                  session?.let(projectHudController::attachTo)
+                }
                 videoJob = viewModelScope.launch {
                   Log.d(TAG, "Collecting video frames from stream")
                   stream?.videoStream?.collect { handleVideoFrame(it) }
@@ -394,6 +424,13 @@ internal class StreamViewModel(
           ?.onSuccess { photoData ->
             Log.d(TAG, "Photo capture successful")
             val normalized = withContext(Dispatchers.Default) { normalizeCapturedPhoto(photoData) }
+            if (normalized == null) {
+              val message = "Could not process the captured photo. Try capturing again."
+              Log.e(TAG, "Photo capture failed: decoding the captured image failed")
+              _uiState.update { it.copy(isCapturing = false, captureErrorMessage = message) }
+              onResult?.invoke(false, message)
+              return@onSuccess
+            }
             val returnToInvestigation = uiState.value.shouldReturnToInvestigationAfterCapture
             _uiState.update {
               it.copy(
@@ -457,16 +494,35 @@ internal class StreamViewModel(
    * the request; [hudCaptureAcceptRequest] is consumed by StreamScreen, which is the one place
    * both this ViewModel and the InvestigationSessionDebugViewModel that owns the actual evidence
    * slots are in scope together - see [onHudCaptureAccepted].
+   *
+   * Also starts [hudUseAcceptTimeoutJob] - see its own doc for why a live consumer is not
+   * guaranteed and what happens if one never arrives.
    */
   private fun onHudUseRequested() {
     val pending = uiState.value.capturedInvestigationEvidence
     if (pending == null) {
       // Defensive only: the HUD only offers Use while it holds AwaitingConfirmation status, which
       // is only reached right after a successful capture populated this field.
+      Log.e(TAG, "onHudUseRequested(): nothing pending to use (should be unreachable)")
       projectHudController.onCaptureFailed("Nothing pending to use.")
       return
     }
+    Log.d(TAG, "onHudUseRequested(): staging evidence for a live StreamScreen consumer")
     _hudCaptureAcceptRequest.value = pending
+    hudUseAcceptTimeoutJob?.cancel()
+    hudUseAcceptTimeoutJob = viewModelScope.launch {
+      resolveIfStillPending(
+          delayMillis = HUD_USE_ACCEPT_TIMEOUT_MS,
+          request = pending,
+          current = { _hudCaptureAcceptRequest.value },
+          onTimedOut = {
+            Log.e(TAG, "onHudUseRequested(): timed out after ${HUD_USE_ACCEPT_TIMEOUT_MS}ms - no live StreamScreen consumed hudCaptureAcceptRequest")
+            _hudCaptureAcceptRequest.value = null
+            _uiState.update { it.copy(capturedInvestigationEvidence = null, capturedPhoto = null) }
+            projectHudController.onCaptureFailed("No active Capture screen to confirm this photo. Open Capture on your phone and try again.")
+          },
+      )
+    }
   }
 
   /**
@@ -477,6 +533,9 @@ internal class StreamViewModel(
    * between capture and Use, never from a network condition.
    */
   fun onHudCaptureAccepted(appended: Boolean) {
+    Log.d(TAG, "onHudCaptureAccepted(appended=$appended)")
+    hudUseAcceptTimeoutJob?.cancel()
+    hudUseAcceptTimeoutJob = null
     _hudCaptureAcceptRequest.value = null
     _uiState.update {
       it.copy(
@@ -559,8 +618,91 @@ internal class StreamViewModel(
     }
   }
 
-  /** Selects the explicit, read-only Project projection without changing Active Project. */
-  fun configureProjectHud(projectId: String?, projectName: String?) {
+  /**
+   * ADR-061 conversation handoff (Blocker 2): tells the HUD control has moved to the phone, once
+   * a Project conversation has consumed an accepted glasses capture - see
+   * ProjectContinuityHudController.acknowledgePhoneControl's doc. Called from ProjectConversation's
+   * own evidence-adoption effect (AppRoot.kt), not from StreamScreen - this ViewModel and its
+   * projectHudController are Activity-scoped (see class doc), so they are exactly as reachable
+   * from there as from a live StreamScreen.
+   */
+  fun acknowledgePhoneControl() {
+    projectHudController.acknowledgePhoneControl()
+  }
+
+  /**
+   * ADR-061 cutover: phone and glasses are both controllers over the SAME capture lifecycle
+   * (ProjectContinuityHudStateMachine.captureStatus is the single authoritative source - see
+   * ConversationCapturePreview's doc in StreamScreen.kt). This is the phone's own Use button for a
+   * conversation-originated capture preview, calling the exact same dispatchUse the glasses HUD's
+   * own Use button calls. Never a second acceptance path: dispatchUse's own generation/
+   * consumedActions guard (see ProjectContinuityHudStateMachine.acceptAction) already makes "Use
+   * from either device accepts exactly once" correct for free - whichever device's tap is
+   * processed first consumes the generation, so a near-simultaneous tap on the other device is
+   * safely rejected as already-consumed, never a duplicate acceptance.
+   */
+  fun useCurrentCaptureFromPhone() {
+    projectHudController.dispatchUse(projectHudController.stateMachine.renderGeneration)
+  }
+
+  /** Phone-side mirror of the glasses HUD's own Retake button - see useCurrentCaptureFromPhone's doc. */
+  fun retakeCurrentCaptureFromPhone() {
+    projectHudController.dispatchRetake(projectHudController.stateMachine.renderGeneration)
+  }
+
+  /**
+   * ADR-061 architect review, Item 2: phone-side mirror of the glasses HUD's own "Continue on
+   * phone" action, offered from the conversation-mode accepted-capture banner (see
+   * ConversationAcceptedCaptureBanner in StreamScreen.kt) once at least one capture has been
+   * accepted this session. Calls the exact same dispatchPhone the glasses button calls - never a
+   * second handoff path - so StreamScreen's existing LaunchedEffect(projectHudPhoneHandoff) still
+   * owns navigating back to the SAME ProjectConversation exactly as it already does for the
+   * glasses-triggered case.
+   */
+  fun continueToConversationFromPhone() {
+    projectHudController.dispatchPhone(projectHudController.stateMachine.renderGeneration)
+  }
+
+  /**
+   * Test-only seam: the HUD's dispatch* functions (Capture/Use/Retake/Analyze/Phone) are what a
+   * real glasses button tap calls - there is no Android View/Compose UI to drive them through
+   * (DAT Display content is a separate SDK-owned render tree - see
+   * ProjectContinuityHudTestHarness.kt's identical reasoning for the JVM-level harness). Exposing
+   * the same real controller this class already owns lets the Phase 2 end-to-end acceptance
+   * harness drive it directly, exactly as ProjectContinuityHudTestHarness does at the JVM level -
+   * never a second, parallel HUD state machine.
+   */
+  internal val projectHudControllerForTesting: ProjectContinuityHudController
+    get() = projectHudController
+
+  /**
+   * Test-only seam: stages evidence exactly where a REAL successful capturePhoto() would have put
+   * it ([StreamUiState.capturedInvestigationEvidence]/[StreamUiState.capturedPhoto]), so the real,
+   * unmodified onHudUseRequested()/onHudCaptureAccepted() logic can pick it up. Exists only because
+   * MockDeviceKit's synthesized PhotoData.HEIC bytes are not decodable by BitmapFactory on every
+   * device/OS build (see Phase2GlassesConversationAcceptanceTest's class doc) - an environment gap
+   * in the raw photo-bytes step, not something this seam works around in Evidence adoption,
+   * conversation transition, idempotency, or persistence, all of which still run for real. Mirrors
+   * ProjectContinuityHudTestHarness.completeCaptureSuccess()'s equivalent scripted-result pattern
+   * at the JVM level.
+   */
+  internal fun stageEvidenceForTesting(evidence: InvestigationEvidenceInput, previewBitmap: Bitmap) {
+    _uiState.update { it.copy(capturedInvestigationEvidence = evidence, capturedPhoto = previewBitmap) }
+  }
+
+  /**
+   * Selects the explicit, read-only Project projection without changing Active Project.
+   *
+   * [returnToConversation]: identical meaning to StreamScreen's own param of the same name -
+   * forwarded through to ProjectContinuityHudController.selectProject's suppressLegacyTrustReview
+   * so a Project Conversation glasses session never has a historical, still-undecided legacy
+   * Investigation hijack its HUD into the trust-review screen (see
+   * ProjectContinuityHudStateMachine.suppressLegacyTrustReview's doc for the proven physical bug
+   * this closes). Every other Capture entry point (Workspace, "Add more evidence", the global
+   * entry) keeps the default false - completely unchanged, legacy trust review still surfaces
+   * exactly as before there.
+   */
+  fun configureProjectHud(projectId: String?, projectName: String?, returnToConversation: Boolean = false) {
     if (projectId.isNullOrBlank() || projectName.isNullOrBlank()) {
       projectHudProjectId = null
       projectHudController.detach()
@@ -568,7 +710,7 @@ internal class StreamViewModel(
     }
     if (projectHudProjectId == projectId) return
     projectHudProjectId = projectId
-    projectHudController.selectProject(projectId, projectName)
+    projectHudController.selectProject(projectId, projectName, suppressLegacyTrustReview = returnToConversation)
   }
 
   fun consumeProjectHudPhoneHandoff(handoff: ProjectHudPhoneHandoff) {
@@ -655,7 +797,13 @@ internal class StreamViewModel(
       val investigationEvidence: InvestigationEvidenceInput,
   )
 
-  private fun normalizeCapturedPhoto(photo: PhotoData): NormalizedCapture {
+  /**
+   * Null only when the platform genuinely could not decode the capture's own bytes (see
+   * decodeHeic's doc) - an honest capture failure, never a crash. The caller (capturePhoto())
+   * surfaces this exactly like any other capture failure (a DatResult error, no active stream,
+   * ...) rather than assuming normalization always succeeds.
+   */
+  private fun normalizeCapturedPhoto(photo: PhotoData): NormalizedCapture? {
     return when (photo) {
       is PhotoData.Bitmap -> {
         val previewBitmap = photo.bitmap
@@ -676,7 +824,7 @@ internal class StreamViewModel(
         // Extract EXIF transformation matrix and apply to bitmap
         val exifInfo = getExifInfo(byteArray)
         val transform = getTransform(exifInfo)
-        val previewBitmap = decodeHeic(byteArray, transform)
+        val previewBitmap = decodeHeic(byteArray, transform) ?: return null
         val evidence =
             heicBytesToInvestigationEvidence(
                 heicBytes = byteArray,
@@ -689,9 +837,15 @@ internal class StreamViewModel(
     }
   }
 
-  // HEIC Decoding with EXIF transformation
-  private fun decodeHeic(heicBytes: ByteArray, transform: Matrix): Bitmap {
-    val bitmap = BitmapFactory.decodeByteArray(heicBytes, 0, heicBytes.size)
+  /**
+   * HEIC decoding with EXIF transformation. Returns null (never crashes) when
+   * BitmapFactory.decodeByteArray cannot decode the given bytes at all - a proven real gap: some
+   * HEIC producers (including MockDeviceKit's simulated capture pipeline, confirmed while building
+   * Phase2GlassesConversationAcceptanceTest.kt) can hand back bytes the platform decoder rejects
+   * outright, previously an unguarded NullPointerException here.
+   */
+  private fun decodeHeic(heicBytes: ByteArray, transform: Matrix): Bitmap? {
+    val bitmap = BitmapFactory.decodeByteArray(heicBytes, 0, heicBytes.size) ?: return null
     return applyTransform(bitmap, transform)
   }
 
@@ -811,4 +965,23 @@ internal class StreamViewModel(
       throw IllegalArgumentException("Unknown ViewModel class")
     }
   }
+}
+
+/**
+ * Waits [delayMillis], then calls [onTimedOut] only if [current] still returns the SAME [request]
+ * instance staged for it (identity equality - a live consumer clears/replaces it well within this
+ * window in the normal case, so this never fires against an already-resolved request). Extracted
+ * as a small, pure, directly-testable unit for the same reason
+ * ProjectContinuityHudController.withOneRetry is - StreamViewModel itself needs a live DAT
+ * DeviceSession and isn't practically unit-testable at this level, but the bounded-timeout logic
+ * itself is (see StreamViewModelHudUseTimeoutTest.kt).
+ */
+internal suspend fun <T> resolveIfStillPending(
+    delayMillis: Long,
+    request: T,
+    current: () -> T?,
+    onTimedOut: () -> Unit,
+) {
+  delay(delayMillis)
+  if (current() === request) onTimedOut()
 }

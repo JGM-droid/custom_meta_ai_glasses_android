@@ -74,6 +74,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -143,6 +144,10 @@ internal fun NewProjectScreen(
   // that arrives later can never land in the wrong field - only one speech session can ever be in
   // flight at a time (the recognizer itself, and every mic button below, both enforce that).
   var voiceTarget by remember { mutableStateOf<NewProjectVoiceTarget?>(null) }
+  val latestName by rememberUpdatedState(name)
+  val latestGoal by rememberUpdatedState(goal)
+  val latestCurrentObjective by rememberUpdatedState(currentObjective)
+  val latestNextAction by rememberUpdatedState(nextAction)
 
   DisposableEffect(speechController) {
     onDispose { speechController?.destroy() }
@@ -157,12 +162,12 @@ internal fun NewProjectScreen(
     speechUiState = transition.state
     transition.transcript?.let { transcript ->
       when (voiceTarget) {
-        NewProjectVoiceTarget.NAME -> name = appendTranscriptToDraft(name, transcript)
-        NewProjectVoiceTarget.GOAL -> goal = appendTranscriptToDraft(goal, transcript)
+        NewProjectVoiceTarget.NAME -> name = appendTranscriptToDraft(latestName, transcript)
+        NewProjectVoiceTarget.GOAL -> goal = appendTranscriptToDraft(latestGoal, transcript)
         NewProjectVoiceTarget.CURRENT_OBJECTIVE ->
-            currentObjective = appendTranscriptToDraft(currentObjective, transcript)
+            currentObjective = appendTranscriptToDraft(latestCurrentObjective, transcript)
         NewProjectVoiceTarget.NEXT_ACTION ->
-            nextAction = appendTranscriptToDraft(nextAction, transcript)
+            nextAction = appendTranscriptToDraft(latestNextAction, transcript)
         null -> Unit
       }
     }
@@ -302,7 +307,7 @@ internal fun NewProjectScreen(
         onClick = { viewModel.submit(name, goal, currentObjective, nextAction) },
         enabled = isFormValid && !isSubmitting && !voiceSessionActive,
         modifier =
-            Modifier.fillMaxWidth().height(52.dp).padding(top = 24.dp).testTag("new_project_create_button"),
+            Modifier.fillMaxWidth().padding(top = 24.dp).height(52.dp).testTag("new_project_create_button"),
         shape = RoundedCornerShape(16.dp),
         colors =
             ButtonDefaults.buttonColors(

@@ -84,8 +84,15 @@ internal class ProjectContinuityHudController(
   private var loadJob: Job? = null
   private var displayReady = false
 
-  fun selectProject(projectId: String, projectName: String) {
-    val request = synchronized(lock) { stateMachine.selectProject(projectId, projectName) }
+  fun selectProject(
+      projectId: String,
+      projectName: String,
+      suppressLegacyTrustReview: Boolean = false,
+  ) {
+    val request =
+        synchronized(lock) {
+          stateMachine.selectProject(projectId, projectName, suppressLegacyTrustReview)
+        }
     render()
     load(request)
   }
@@ -229,6 +236,7 @@ internal class ProjectContinuityHudController(
     val captureStatus: ProjectHudCaptureStatus
     val analysisEligibility: ProjectHudAnalysisEligibility
     val analysisStatus: ProjectHudAnalysisStatus
+    val phoneControlActive: Boolean
     synchronized(lock) {
       if (!displayReady) return false
       targetDisplay = display ?: return false
@@ -238,9 +246,10 @@ internal class ProjectContinuityHudController(
       captureStatus = stateMachine.captureStatus
       analysisEligibility = stateMachine.analysisEligibility
       analysisStatus = stateMachine.analysisStatus
+      phoneControlActive = stateMachine.phoneControlActive
     }
     var succeeded = true
-    targetDisplay.sendContent { renderState(state, generation, phoneActionLabel, captureStatus, analysisEligibility, analysisStatus) }.onFailure { error, _ ->
+    targetDisplay.sendContent { renderState(state, generation, phoneActionLabel, captureStatus, analysisEligibility, analysisStatus, phoneControlActive) }.onFailure { error, _ ->
       succeeded = false
       Log.e(TAG, "Could not render Project HUD: ${error.description}")
     }
@@ -254,7 +263,15 @@ internal class ProjectContinuityHudController(
       captureStatus: ProjectHudCaptureStatus,
       analysisEligibility: ProjectHudAnalysisEligibility,
       analysisStatus: ProjectHudAnalysisStatus,
+      phoneControlActive: Boolean,
   ) {
+    // Highest precedence of all - see ProjectContinuityHudStateMachine.phoneControlActive's doc.
+    // Once control has moved to the phone, nothing else (not even an awaiting Use/Retake decision
+    // left over from before the handoff) is ever shown again for this session.
+    if (phoneControlActive) {
+      phoneControlScreen(state.projectName)
+      return
+    }
     // Awaiting a Use/Retake decision takes over the whole HUD rather than being folded into the
     // normal per-state screens below - it is a decision point, not routine Project content, and
     // keeping Use/Retake as the only two options on-screen avoids a mistap on a small HUD.
@@ -314,6 +331,21 @@ internal class ProjectContinuityHudController(
       // Never actually reached: renderState() short-circuits to captureConfirmationScreen()
       // before falling into whichever screen calls captureRow(). Listed only for when-exhaustiveness.
       ProjectHudCaptureStatus.AwaitingConfirmation -> Unit
+    }
+  }
+
+  /**
+   * The neutral screen shown once control has moved to the phone - see
+   * ProjectContinuityHudStateMachine.phoneControlActive's doc. Deliberately offers no actions at
+   * all, not even "Continue on phone" again: the phone conversation is already authoritative for
+   * this interaction, so a second interactive surface here would just compete with it. This is
+   * intentionally NOT a synchronization of the phone conversation's transcript or state - just
+   * enough to honestly show that the glasses are no longer where this interaction continues.
+   */
+  private fun ContentScope.phoneControlScreen(projectName: String) {
+    flexBox(direction = Direction.COLUMN, gap = 10) {
+      text(short(projectName), style = TextStyle.HEADING)
+      text("Continue on phone", style = TextStyle.BODY, color = TextColor.SECONDARY)
     }
   }
 
@@ -483,6 +515,12 @@ internal class ProjectContinuityHudController(
           text(short(it), style = TextStyle.BODY)
         }
       }
+      // Rich Project Intelligence V1 (ADR-059): bounded EXPLORE_PLAN headline only - never the
+      // option cards/rationale/tradeoffs themselves (see ExplorePlanPanel.kt for those, phone-only).
+      content.explorePlan?.let {
+        text("DESIGN IDEAS", style = TextStyle.META, color = TextColor.SECONDARY)
+        text(short(it.headline), style = TextStyle.BODY)
+      }
       captureRow(captureStatus, generation)
       analysisRow(analysisEligibility, analysisStatus, generation, hasPriorSuggestion = content.latestGuidance != null)
       if (content.hasAdditionalDetails) {
@@ -519,6 +557,10 @@ internal class ProjectContinuityHudController(
         text("NEEDS ATTENTION", style = TextStyle.META, color = TextColor.SECONDARY)
         text(short(it), style = TextStyle.BODY)
       }
+      content.explorePlan?.let {
+        text("DESIGN IDEAS", style = TextStyle.META, color = TextColor.SECONDARY)
+        text(short(it.headline), style = TextStyle.BODY)
+      }
       captureRow(captureStatus, generation)
       analysisRow(analysisEligibility, analysisStatus, generation, hasPriorSuggestion = content.latestGuidance != null)
       button("Back", onClick = { dispatchBack(generation) })
@@ -541,9 +583,37 @@ internal class ProjectContinuityHudController(
     if (changed) render()
   }
 
+  /**
+   * Renders the neutral handoff screen (phoneControlActive is now true - see its doc) and waits
+   * for that render attempt to actually finish (success or exhausted retry) BEFORE calling
+   * [onPhoneHandoff] - which the session owner (StreamViewModel) responds to by tearing down this
+   * Display (see StreamScreen's LaunchedEffect(projectHudPhoneHandoff) -> stopStream()). Ordering
+   * this way is the entire fix: without it, [onPhoneHandoff] could tear the Display down before
+   * the neutral frame ever reached the glasses, leaving whatever interactive screen was showing as
+   * the last thing physically visible - exactly the stale-HUD symptom this closes.
+   */
   internal fun dispatchPhone(generation: Long) {
-    val handoff = synchronized(lock) { stateMachine.phoneHandoff(generation) } ?: return
-    onPhoneHandoff(handoff)
+    val handoff = synchronized(lock) { stateMachine.phoneHandoff(generation) }
+    Log.d(TAG, "dispatchPhone(generation=$generation) handoff=$handoff")
+    if (handoff == null) return
+    scope.launch(Dispatchers.IO) {
+      renderCurrentStateWithOneRetry()
+      onPhoneHandoff(handoff)
+    }
+  }
+
+  /**
+   * The OTHER trigger for the same neutral handoff - see
+   * ProjectContinuityHudStateMachine.acknowledgePhoneControl's doc. Called by the session owner
+   * once the phone has consumed an accepted glasses capture into a Project conversation, whether
+   * or not a fresh Continue-on-phone tap preceded it this exact moment. No teardown sequencing
+   * concern here the way [dispatchPhone] has: by the time the phone can have consumed anything,
+   * Continue on phone (or Done) has already run and settled - see class doc. A plain render() -
+   * fire and forget - here that's already a no-op if the Display was detached in the meantime.
+   */
+  fun acknowledgePhoneControl() {
+    val changed = synchronized(lock) { stateMachine.acknowledgePhoneControl() }
+    if (changed) render()
   }
 
   internal fun dispatchRefresh(generation: Long) {
@@ -554,6 +624,7 @@ internal class ProjectContinuityHudController(
 
   internal fun dispatchCapture(generation: Long) {
     val accepted = synchronized(lock) { stateMachine.acceptCapture(generation) }
+    Log.d(TAG, "dispatchCapture(generation=$generation) accepted=$accepted")
     if (!accepted) return
     render()
     onCaptureRequested()
@@ -562,6 +633,7 @@ internal class ProjectContinuityHudController(
   /** Called by the session owner once a HUD-requested capture has finished successfully. */
   fun onCaptureSucceeded() {
     val changed = synchronized(lock) { stateMachine.captureSucceeded() }
+    Log.d(TAG, "onCaptureSucceeded() changed=$changed captureStatus=${stateMachine.captureStatus}")
     if (changed) render()
   }
 
@@ -570,12 +642,14 @@ internal class ProjectContinuityHudController(
     // screen stays exactly as-is (Use/Retake still visible but no longer tappable at this
     // generation) until the owner reports back via onCaptureAccepted/onCaptureFailed below.
     val accepted = synchronized(lock) { stateMachine.acceptUse(generation) }
+    Log.d(TAG, "dispatchUse(generation=$generation) accepted=$accepted")
     if (!accepted) return
     onUseRequested()
   }
 
   internal fun dispatchRetake(generation: Long) {
     val accepted = synchronized(lock) { stateMachine.acceptRetake(generation) }
+    Log.d(TAG, "dispatchRetake(generation=$generation) accepted=$accepted")
     if (!accepted) return
     render()
     onRetakeRequested()
@@ -584,6 +658,7 @@ internal class ProjectContinuityHudController(
   /** Called by the session owner once a HUD-requested Use has been added as evidence. */
   fun onCaptureAccepted() {
     val changed = synchronized(lock) { stateMachine.captureAccepted() }
+    Log.d(TAG, "onCaptureAccepted() changed=$changed evidenceAcceptedThisSession=${stateMachine.evidenceAcceptedThisSession}")
     if (changed) render()
   }
 
@@ -594,6 +669,7 @@ internal class ProjectContinuityHudController(
    */
   fun onCaptureFailed(message: String) {
     val changed = synchronized(lock) { stateMachine.captureFailed(message) }
+    Log.d(TAG, "onCaptureFailed(message=$message) changed=$changed")
     if (changed) render()
   }
 

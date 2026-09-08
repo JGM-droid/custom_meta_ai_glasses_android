@@ -73,7 +73,14 @@ class InvestigationPanelReopenContractTest {
         )
 
     assertTrue(streamScreen.contains("if (showInvestigationReopenAffordance)"))
-    assertTrue(streamScreen.contains("!streamUiState.isInvestigationPanelVisible"))
+    // ADR-061 reconciliation: this used to check for an inline "!streamUiState.
+    // isInvestigationPanelVisible" negation directly in StreamScreen.kt. That logic was later
+    // extracted into the small, pure, directly-tested shouldShowInvestigationReopenAffordance()
+    // (see StreamScreenLegacyUiGateTest's reopenAffordanceNeverShowsWhileAnotherSheetOrDialogIs
+    // AlreadyUp, which now proves the actual behavior far more robustly than a source-text match
+    // could). This contract test's remaining job is just confirming the call site still wires the
+    // real StreamUiState field into that function, not a stale/fabricated one.
+    assertTrue(streamScreen.contains("isInvestigationPanelVisible = streamUiState.isInvestigationPanelVisible"))
     assertTrue(streamScreen.contains("hasActiveInvestigation(investigationUiState)"))
     assertTrue(streamScreen.contains("onClick = { streamViewModel.showInvestigationPanel() }"))
     assertTrue(streamScreen.contains("Text(\"Resume ${'$'}investigationReopenLabel\")"))

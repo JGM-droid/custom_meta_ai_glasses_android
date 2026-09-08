@@ -540,6 +540,82 @@ class ProjectContinuityHudStateTest {
     assertNull((state.uiState as ProjectHudUiState.Ready).content.pendingTrustReview)
   }
 
+  /**
+   * Phase 2 stale-trust-HUD fix, root behavior: a Project Conversation glasses session
+   * (suppressLegacyTrustReview = true - StreamViewModel.configureProjectHud's returnToConversation
+   * forwarded here, see its doc) must never have a historical, still-undecided legacy Investigation
+   * hijack its content into a trust-review decision point - it stays exactly the fresh, capture-
+   * ready Ready content this session actually asked for. Uses the SAME undecided overview()
+   * mapOverviewExposesAPendingTrustReviewOnlyWhenUndecided above proves DOES normally produce a
+   * pendingTrustReview, proving this is genuinely suppression, not an overview that never had one.
+   */
+  @Test
+  fun conversationEntrySuppressesAHistoricalUndecidedTrustReview() {
+    val state = ProjectContinuityHudStateMachine()
+    val request = state.selectProject(PROJECT_A, "AC Repair", suppressLegacyTrustReview = true)
+    state.accept(request, overview(PROJECT_A, "AC Repair", trustDecision = null))
+
+    val content = (state.uiState as ProjectHudUiState.Ready).content
+    assertNull(content.pendingTrustReview)
+    // Project identity is still exactly correct - only the decision-point projection is suppressed.
+    assertEquals(PROJECT_A, content.projectId)
+    assertEquals("AC Repair", content.projectName)
+  }
+
+  /**
+   * The record itself is never touched: the SAME overview, opened WITHOUT suppression (the
+   * legacy Investigation/trust entry point's own default), still surfaces the pending review
+   * exactly as mapOverviewExposesAPendingTrustReviewOnlyWhenUndecided proves - this is a per-
+   * session projection choice, never a mutation of canonical Project state.
+   */
+  @Test
+  fun legacyEntryStillSurfacesTheSameHistoricalTrustReviewSuppressionNeverMutatesTheRecord() {
+    val state = ProjectContinuityHudStateMachine()
+    val request = state.selectProject(PROJECT_A, "AC Repair", suppressLegacyTrustReview = false)
+    state.accept(request, overview(PROJECT_A, "AC Repair", trustDecision = null))
+
+    val pending = (state.uiState as ProjectHudUiState.Ready).content.pendingTrustReview
+    assertEquals("session-a", pending?.sessionId)
+  }
+
+  /**
+   * A Refresh from within a suppressed session must never resurrect the historical review either
+   * - refresh() re-runs accept() against the SAME suppressLegacyTrustReview this session was
+   * selected with (a stored per-session field, not a one-shot argument to selectProject alone -
+   * see its own doc), not a fresh unsuppressed default.
+   */
+  @Test
+  fun refreshWithinASuppressedSessionDoesNotResurrectTheHistoricalTrustReview() {
+    val state = ProjectContinuityHudStateMachine()
+    val request = state.selectProject(PROJECT_A, "AC Repair", suppressLegacyTrustReview = true)
+    state.accept(request, overview(PROJECT_A, "AC Repair", trustDecision = null))
+    assertNull((state.uiState as ProjectHudUiState.Ready).content.pendingTrustReview)
+
+    val refreshRequest = state.refresh()!!
+    state.accept(refreshRequest, overview(PROJECT_A, "AC Repair", trustDecision = null))
+
+    assertNull((state.uiState as ProjectHudUiState.Ready).content.pendingTrustReview)
+  }
+
+  /**
+   * Per-session boundary: a fresh explicit Project selection without suppression - e.g. the user
+   * backs all the way out and re-enters through the legacy Investigation continuation entry point
+   * for the SAME Project - must NOT still be suppressing on the strength of a previous glasses
+   * sitting's conversation entry.
+   */
+  @Test
+  fun freshSelectionWithoutSuppressionAfterASuppressedSessionSurfacesTheReviewAgain() {
+    val state = ProjectContinuityHudStateMachine()
+    val suppressedRequest = state.selectProject(PROJECT_A, "AC Repair", suppressLegacyTrustReview = true)
+    state.accept(suppressedRequest, overview(PROJECT_A, "AC Repair", trustDecision = null))
+    assertNull((state.uiState as ProjectHudUiState.Ready).content.pendingTrustReview)
+
+    val freshRequest = state.selectProject(PROJECT_A, "AC Repair", suppressLegacyTrustReview = false)
+    state.accept(freshRequest, overview(PROJECT_A, "AC Repair", trustDecision = null))
+
+    assertEquals("session-a", (state.uiState as ProjectHudUiState.Ready).content.pendingTrustReview?.sessionId)
+  }
+
   @Test
   fun analysisEligibilityOnlyTriggersARenderOnAnActualChange() {
     val state = ProjectContinuityHudStateMachine()

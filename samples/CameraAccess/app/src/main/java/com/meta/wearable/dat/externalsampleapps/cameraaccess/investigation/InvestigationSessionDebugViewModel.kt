@@ -651,22 +651,27 @@ internal class InvestigationSessionDebugViewModel(
     }
   }
 
-  private fun buildDraft(): InvestigationSubmissionDraft? {
-    val selectedEvidence =
-        _uiState.value.images.mapIndexedNotNull { index, slot ->
-          slot.evidence?.let { return@mapIndexedNotNull it.copy(slotIndex = index) }
+  /** Converts current image slots into ordered upload-ready evidence - shared by [buildDraft]
+   * (which additionally requires at least one item) and [stagePendingEvidenceForGuidance] (which
+   * does not: reusing an existing session with nothing new to add is a valid, empty-list case). */
+  private fun selectedEvidenceForUpload(): List<InvestigationEvidenceInput> =
+      _uiState.value.images.mapIndexedNotNull { index, slot ->
+        slot.evidence?.let { return@mapIndexedNotNull it.copy(slotIndex = index) }
 
-          val uriText = slot.uriString ?: return@mapIndexedNotNull null
-          val uri = Uri.parse(uriText)
-          val input = readUriBytes(uri) ?: return@mapIndexedNotNull null
-          InvestigationEvidenceInput(
-              slotIndex = index,
-              filename = slot.displayName ?: uri.lastPathSegment ?: "capture_$index.jpg",
-              mimeType = detectMimeType(uri) ?: "image/jpeg",
-              bytes = input,
-              source = InvestigationEvidenceSource.LOCAL_PICKER,
-          )
-        }
+        val uriText = slot.uriString ?: return@mapIndexedNotNull null
+        val uri = Uri.parse(uriText)
+        val input = readUriBytes(uri) ?: return@mapIndexedNotNull null
+        InvestigationEvidenceInput(
+            slotIndex = index,
+            filename = slot.displayName ?: uri.lastPathSegment ?: "capture_$index.jpg",
+            mimeType = detectMimeType(uri) ?: "image/jpeg",
+            bytes = input,
+            source = InvestigationEvidenceSource.LOCAL_PICKER,
+        )
+      }
+
+  private fun buildDraft(): InvestigationSubmissionDraft? {
+    val selectedEvidence = selectedEvidenceForUpload()
 
     if (selectedEvidence.isEmpty() ||
         selectedEvidence.size > InvestigationCaptureSlots.MAX_CAPTURE_SLOTS) {
@@ -684,6 +689,63 @@ internal class InvestigationSessionDebugViewModel(
         continuationSessionId = _uiState.value.continuationSessionId
             ?: _uiState.value.sessionId.takeIf { _uiState.value.clientState == InvestigationClientState.FAILED },
     )
+  }
+
+  /**
+   * ADR-060 multimodal bridge: makes any currently accepted pending evidence (glasses or
+   * phone-added) backend-available BEFORE the unified Get Guidance request, so a text-only
+   * fallback never silently substitutes for a photo the user already accepted. Returns the
+   * resulting session_id to pass through to POST /ai-results, or null when there is truly nothing
+   * to stage and no existing session to reuse (Get Guidance must remain fully text-only capable in
+   * that case) - never fabricates a session just to have one.
+   *
+   * Safe to call again on every Get Guidance tap, including after a prior failure: session reuse
+   * (via the already-persisted uiState.sessionId) plus the backend's own content-hash evidence
+   * dedup (see InvestigationSessionRepository.stageEvidence's doc) together guarantee this never
+   * creates a duplicate session or duplicate evidence, with no separate bookkeeping needed here.
+   */
+  suspend fun stagePendingEvidenceForGuidance(): String? {
+    return stagePendingEvidenceForConversation()?.session?.sessionId
+  }
+
+  /**
+   * Stages the accepted capture once and returns the canonical records for conversation use.
+   *
+   * Dispatches its own network call to [Dispatchers.IO] rather than trusting every caller to -
+   * [ProjectGuidanceViewModel.getGuidance] already wraps its own [stagePendingEvidenceForGuidance]
+   * call this way, but ProjectConversationScreen's LaunchedEffect(glassesEvidencePending, ...)
+   * (the ADR-061 glasses-to-conversation handoff) called this directly from the Main dispatcher -
+   * invisible against the JVM/instrumented harnesses' FakeInvestigationSessionApi (no real
+   * network), but a real HttpUrlInvestigationSessionApi call on a physical device throws
+   * NetworkOnMainThreadException there, silently losing the accepted glasses evidence before it
+   * ever reaches the conversation. Proven via a real Compose-composable-level regression test -
+   * see ProjectConversationScreenTest.
+   * glassesEvidencePendingAdoptsRealLiveEvidenceThroughTheActualComposableWiring.
+   */
+  suspend fun stagePendingEvidenceForConversation(): StagedConversationEvidence? {
+    val state = _uiState.value
+    val selectedEvidence = selectedEvidenceForUpload()
+    if (selectedEvidence.isEmpty() && state.sessionId == null) return null
+
+    val staged = withContext(Dispatchers.IO) {
+      repository.stageEvidenceForConversation(
+          InvestigationSubmissionDraft(
+              evidence = selectedEvidence,
+              explanationText = state.explanationText,
+              clientMetadata = mapOf(
+                  "source" to "cameraaccess_debug",
+                  "backend_base_url" to state.backendBaseUrl,
+              ),
+              projectId = sourceProjectId,
+              continuationSessionId = state.sessionId,
+          ),
+      )
+    }
+    _uiState.update {
+      it.copy(sessionId = staged.session.sessionId, backendStatus = staged.session.status)
+    }
+    savedStateHandle["investigation_session_id"] = staged.session.sessionId
+    return staged
   }
 
   private fun readUriBytes(uri: Uri): ByteArray? {

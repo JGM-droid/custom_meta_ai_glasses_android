@@ -36,6 +36,49 @@ class InvestigationProductStateTest {
     )
   }
 
+  /**
+   * ADR-061 architect review, Item 1: reproduces, then closes, the identity collision the
+   * reconciliation pass found. Before [InvestigationInteractionContext] existed,
+   * investigationViewModelKey(sourceProjectId, continuationSessionId) was a pure function of only
+   * those two arguments - StreamScreen called it with the IDENTICAL two arguments for a
+   * conversation-originated capture (returnToConversation = true) and for the legacy Capture entry
+   * point, for the same Project with no backend session yet (continuationSessionId = null in both
+   * cases). Reproduction: the two-argument overload still defaults to LEGACY, so calling it exactly
+   * as both of those call sites used to is provably the identical string - this first assertion IS
+   * the collision, unchanged from before the fix. Isolation: passing the two interaction contexts
+   * explicitly - what StreamScreen and ProjectConversationScreen do now - proves they never
+   * collide, while same-context call sites (the Option B legacy loop above, and the
+   * conversation-to-conversation handoff below) still correctly match.
+   */
+  @Test
+  fun conversationOriginatedAndLegacyInteractionContextsNeverCollideForTheSameProjectAndNullContinuation() {
+    // Reproduction: this is exactly what StreamScreen computed for BOTH modes before this fix -
+    // the collision this ADR-061 reconciliation pass exists to remove.
+    assertEquals(
+        investigationViewModelKey("project-a", null),
+        investigationViewModelKey("project-a", null),
+    )
+
+    // Isolation: the same (project, null) pair, but the two real interaction contexts StreamScreen
+    // now distinguishes, must never produce the same key.
+    val legacyKey = investigationViewModelKey("project-a", null, InvestigationInteractionContext.LEGACY)
+    val conversationKey = investigationViewModelKey("project-a", null, InvestigationInteractionContext.CONVERSATION)
+    assertFalse(legacyKey == conversationKey)
+
+    // The default (no explicit context passed) must still be LEGACY, unchanged - every pre-existing
+    // legacy call site (ProjectDetailScreen's ContinueInvestigationSection, the global Capture
+    // entry) must keep resolving exactly as before this fix, with no call-site changes required.
+    assertEquals(legacyKey, investigationViewModelKey("project-a", null))
+
+    // The conversation context must still match ITSELF across the glasses-to-conversation handoff
+    // (StreamScreen's returnToConversation = true and ProjectConversationScreen's
+    // glassesEvidenceViewModel both compute this) - isolation from legacy must never break that.
+    assertEquals(
+        conversationKey,
+        investigationViewModelKey("project-a", null, InvestigationInteractionContext.CONVERSATION),
+    )
+  }
+
   @Test
   fun restoredKnownSessionIsPromotedToRepositoryReconciliation() {
     assertEquals(
@@ -215,6 +258,23 @@ class InvestigationProductStateTest {
                 )
 
         assertEquals("Investigation · 2 views", label)
+    }
+
+    @Test
+    fun conversationAcceptedCaptureLabelReportsSingularCount() {
+        val label = conversationAcceptedCaptureLabel(
+            InvestigationSessionDebugUiState(activeCaptureCount = 1, hasCaptureCapacity = true),
+        )
+        assertEquals("1 photo accepted", label)
+    }
+
+    @Test
+    fun conversationAcceptedCaptureLabelReportsPluralCountAndNeverMentionsInvestigation() {
+        val label = conversationAcceptedCaptureLabel(
+            InvestigationSessionDebugUiState(activeCaptureCount = 2, hasCaptureCapacity = true),
+        )
+        assertEquals("2 photos accepted", label)
+        assertFalse(label.contains("Investigation"))
     }
 
     @Test

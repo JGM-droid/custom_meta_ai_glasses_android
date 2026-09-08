@@ -374,10 +374,14 @@ class ProjectContinuityHudAcceptanceHarnessTest {
     assertEquals("Photo capture timed out.", failed.message)
     assertTrue(harness.displayErrors.isEmpty())
 
-    // "Return without restarting the Project": an unrelated action on the same screen still works
-    // - the Failed status never took over the whole HUD.
-    harness.tapPhone()
-    assertEquals(1, harness.phoneHandoffs.size)
+    // An unrelated action on the same screen still works - the Failed status never took over the
+    // whole HUD. (Deliberately Refresh, not Continue on phone: ADR-061 made phoneHandoff() a
+    // one-way handoff - see continueOnPhoneActivatesTheNeutralHandoffState/
+    // onceHandedOffToPhoneNoFurtherGlassesActionsAreDispatchable below for that behavior, which
+    // would make Capture correctly UNdispatchable afterward, the opposite of this test's point.)
+    val overviewFetchesBeforeRefresh = harness.repository.getProjectOverviewCallCount
+    harness.tapRefresh()
+    assertTrue(harness.repository.getProjectOverviewCallCount > overviewFetchesBeforeRefresh)
 
     // "Retry": the SAME Capture button, at the CURRENT generation, works normally again.
     harness.tapCapture()
@@ -400,6 +404,169 @@ class ProjectContinuityHudAcceptanceHarnessTest {
 
     assertTrue(harness.stateMachine.uiState is ProjectHudUiState.Disconnected)
     assertEquals(ProjectHudCaptureStatus.Idle, harness.stateMachine.captureStatus)
+    harness.close()
+  }
+
+  /**
+   * ADR-061 conversation handoff (Phase 2 Blocker 2), root behavior: "Continue on phone" through
+   * the real controller must both report the handoff AND leave the state machine in the neutral
+   * phoneControlActive state renderState() gives absolute precedence to - see
+   * ProjectContinuityHudStateMachine.phoneControlActive's doc. Uses the exact same
+   * evidence-accepted setup the ACTIVE_INVESTIGATION destination tests above already establish,
+   * proving this new behavior composes with the existing determinism fix rather than replacing it.
+   */
+  @Test
+  fun continueOnPhoneActivatesTheNeutralHandoffState() = runBlocking {
+    val harness = ProjectContinuityHudTestHarness(initialOverview = emptyOverview())
+    harness.openProject(PROJECT_A, "AC Repair")
+    harness.attachDisplay()
+    harness.tapCapture()
+    harness.completeCaptureSuccess()
+    harness.tapUse()
+    harness.completeUseAccepted()
+    assertFalse(harness.stateMachine.phoneControlActive)
+
+    harness.tapPhone()
+
+    assertEquals(1, harness.phoneHandoffs.size)
+    assertTrue(harness.stateMachine.phoneControlActive)
+    harness.close()
+  }
+
+  /**
+   * The other half of Blocker 2: once phoneControlActive is true, every generation-guarded action
+   * is refused - not just visually replaced - so a stale/lingering physical frame the DAT display
+   * briefly holds after Continue on phone (see ProjectContinuityHudController.dispatchPhone's doc
+   * on why render() now runs before onPhoneHandoff) can never actually DO anything if tapped.
+   * Exercises capture, analyze, and refresh - the three actions every one of renderState()'s
+   * normal screens can offer - through the real controller's own dispatch* entry points.
+   */
+  @Test
+  fun onceHandedOffToPhoneNoFurtherGlassesActionsAreDispatchable() = runBlocking {
+    val harness = ProjectContinuityHudTestHarness(initialOverview = emptyOverview())
+    harness.openProject(PROJECT_A, "AC Repair")
+    harness.attachDisplay()
+    harness.tapCapture()
+    harness.completeCaptureSuccess()
+    harness.tapUse()
+    harness.completeUseAccepted()
+    harness.pushAnalysisEligibility(
+        ProjectHudAnalysisEligibility(canAnalyze = true, hasEvidence = true, hasExplanation = true),
+    )
+    harness.tapPhone()
+    assertTrue(harness.stateMachine.phoneControlActive)
+
+    harness.tapCapture()
+    harness.tapAnalyze()
+    harness.tapRefresh()
+
+    assertEquals(1, harness.captureRequestedCount) // the one from before handoff only
+    assertEquals(0, harness.analyzeRequestedCount)
+    assertEquals(ProjectHudCaptureStatus.Idle, harness.stateMachine.captureStatus)
+    harness.close()
+  }
+
+  /**
+   * The OTHER trigger for the same neutral handoff (Blocker 2): the phone consuming an accepted
+   * glasses capture into a Project conversation, exercised here as StreamViewModel itself would
+   * call it (see StreamViewModel.acknowledgePhoneControl's doc) - directly against the real
+   * controller, no fresh Continue-on-phone tap in this scenario at all. Idempotent: a second call
+   * once already active changes nothing (no crash, no double render()).
+   */
+  @Test
+  fun acknowledgePhoneControlAloneActivatesTheNeutralHandoffAndIsIdempotent() = runBlocking {
+    val harness = ProjectContinuityHudTestHarness(initialOverview = emptyOverview())
+    harness.openProject(PROJECT_A, "AC Repair")
+    harness.attachDisplay()
+    assertFalse(harness.stateMachine.phoneControlActive)
+
+    harness.controller.acknowledgePhoneControl()
+    harness.settle()
+    assertTrue(harness.stateMachine.phoneControlActive)
+
+    harness.controller.acknowledgePhoneControl()
+    harness.settle()
+    assertTrue(harness.stateMachine.phoneControlActive)
+    harness.close()
+  }
+
+  /**
+   * Per-session boundary: a fresh explicit Project selection (the same "Resume on glasses"
+   * re-entry point phoneHandoffThenResumeOnGlasses_... above already exercises for
+   * analysisEligibility/evidenceAcceptedThisSession) must also clear phoneControlActive, so a new
+   * glasses sitting for the SAME or a different Project never starts pre-stuck on the neutral
+   * handoff screen.
+   */
+  @Test
+  fun freshProjectSelectionResetsPhoneControlActiveAndCaptureIsDispatchableAgain() = runBlocking {
+    val harness = ProjectContinuityHudTestHarness(initialOverview = emptyOverview())
+    harness.openProject(PROJECT_A, "AC Repair")
+    harness.attachDisplay()
+    harness.tapCapture()
+    harness.completeCaptureSuccess()
+    harness.tapUse()
+    harness.completeUseAccepted()
+    harness.tapPhone()
+    assertTrue(harness.stateMachine.phoneControlActive)
+
+    harness.openProject(PROJECT_A, "AC Repair")
+
+    assertFalse(harness.stateMachine.phoneControlActive)
+    harness.attachDisplay()
+    harness.tapCapture()
+    assertEquals(ProjectHudCaptureStatus.Capturing, harness.stateMachine.captureStatus)
+    harness.close()
+  }
+
+  /**
+   * Phase 2 stale-trust-HUD fix, exercised through the real controller: a Project Conversation
+   * glasses session (suppressLegacyTrustReview = true) opened against a Project whose LAST
+   * Investigation was never explicitly decided must land on fresh capture-ready content, not the
+   * trust-review screen - and a brand new Capture -> Use -> Continue on phone must still work
+   * normally afterward, proving this suppression composes with the existing phoneControlActive/
+   * AwaitingConfirmation precedence protections rather than replacing them.
+   */
+  @Test
+  fun conversationEntryStaysOnFreshCaptureReadyContentDespiteAnUndecidedHistoricalReview() = runBlocking {
+    val harness = ProjectContinuityHudTestHarness(initialOverview = overviewWithUndecidedReview())
+    harness.openProject(PROJECT_A, "AC Repair", suppressLegacyTrustReview = true)
+    harness.attachDisplay()
+
+    val ready = harness.stateMachine.uiState as ProjectHudUiState.Ready
+    assertNull(ready.content.pendingTrustReview)
+    assertEquals(PROJECT_A, ready.content.projectId)
+
+    // Refresh alone must never resurrect it either - the suppression is per-session, not per-call.
+    harness.tapRefresh()
+    assertNull((harness.stateMachine.uiState as ProjectHudUiState.Ready).content.pendingTrustReview)
+
+    // A genuinely NEW capture still goes all the way through Capture -> Use -> Continue on phone.
+    harness.tapCapture()
+    assertEquals(ProjectHudCaptureStatus.Capturing, harness.stateMachine.captureStatus)
+    harness.completeCaptureSuccess()
+    harness.tapUse()
+    harness.completeUseAccepted()
+    harness.tapPhone()
+
+    assertEquals(1, harness.phoneHandoffs.size)
+    assertTrue(harness.stateMachine.phoneControlActive)
+    harness.close()
+  }
+
+  /**
+   * The other half: WITHOUT suppression (the legacy Investigation/trust entry point's own
+   * default), the exact same undecided historical review still takes over the HUD exactly as
+   * before this fix - proving the fix is a routing/state-selection choice at entry, never a
+   * change to renderState()'s own precedence or to the record itself.
+   */
+  @Test
+  fun legacyEntryStillLandsOnTheTrustReviewScreenForTheSameUndecidedHistoricalReview() = runBlocking {
+    val harness = ProjectContinuityHudTestHarness(initialOverview = overviewWithUndecidedReview())
+    harness.openProject(PROJECT_A, "AC Repair") // suppressLegacyTrustReview defaults to false
+    harness.attachDisplay()
+
+    val pending = (harness.stateMachine.uiState as ProjectHudUiState.Ready).content.pendingTrustReview
+    assertEquals(SESSION_ID, pending?.sessionId)
     harness.close()
   }
 

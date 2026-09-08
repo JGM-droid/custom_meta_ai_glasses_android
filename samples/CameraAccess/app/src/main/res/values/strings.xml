@@ -27,6 +27,8 @@
     <string name="non_stream_screen_description" description="Non stream screen description">Tap the Start streaming button to stream video from your glasses or use the camera button to take a photo from your glasses.</string>
     <string name="non_stream_screen_title" description="Non stream screen title">Stream Your Glasses Camera</string>
     <string name="waiting_for_active_device" description="Waiting for active device message">Waiting for an active device</string>
+    <string name="reconnect_glasses_hint" description="Explains why a restart is needed when no active device is found after a prior stream session">If your glasses were streaming and then disconnected, this app may need a restart to see them again.</string>
+    <string name="restart_app_button_title" description="Restarts the app process to force fresh glasses discovery">Restart app to reconnect</string>
     <string name="update_required_title" description="Update required warning title">Update required</string>
     <string name="update_required_firmware_message" description="Firmware update required warning">Your glasses firmware needs an update before Project Assistant can start.</string>
     <string name="update_required_dat_app_message" description="DAT app update required warning">The app on your glasses needs an update before Project Assistant can start.</string>

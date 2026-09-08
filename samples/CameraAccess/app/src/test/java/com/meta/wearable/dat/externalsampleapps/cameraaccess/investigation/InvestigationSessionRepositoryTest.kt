@@ -719,6 +719,116 @@ class InvestigationSessionRepositoryTest {
     assertTrue(api.callTrace.single().startsWith("trust:more_evidence:11111111"))
   }
 
+  // --- ADR-060 multimodal bridge: stageEvidence (create/reuse + upload, never analyze) ---
+
+  @Test
+  fun stageEvidenceCreatesSessionUploadsEvidenceInOrderAndNeverCallsAnalyze() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api)
+
+    val session = repository.stageEvidence(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("first.jpg"), image("second.jpg"), image("third.jpg")),
+            explanationText = "My condenser won't start.",
+            projectId = "11111111-1111-1111-1111-111111111111",
+        ),
+    )
+
+    assertEquals(FakeInvestigationSessionApi.SESSION_ID, session.sessionId)
+    assertEquals(1, api.createSessionCalls)
+    // Order preserved exactly as supplied - proves evidence ordering (item 2) and that the
+    // backend receives every item before any routing/reasoning call could occur (item 9).
+    assertEquals(listOf("first.jpg", "second.jpg", "third.jpg"), api.uploadedImageFilenames)
+    // Explanation attached to the first upload only (existing submitInvestigation convention -
+    // the backend's own explanation normalization already concatenates across evidence records).
+    assertEquals(listOf("My condenser won't start.", null, null), api.uploadedExplanationTexts)
+    // Zero AI reasoning calls - staging is pure storage, never a second reasoning operation.
+    assertEquals(0, api.analyzeCalls)
+    assertFalse(api.callTrace.contains("analyze"))
+  }
+
+  @Test
+  fun conversationStagingReturnsCanonicalSessionAndEvidenceReferenceIds() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api)
+
+    val staged = repository.stageEvidenceForConversation(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("conversation-photo.jpg")),
+            explanationText = "",
+            projectId = "11111111-1111-1111-1111-111111111111",
+        ),
+    )
+
+    assertEquals(FakeInvestigationSessionApi.SESSION_ID, staged.session.sessionId)
+    assertEquals("123e4567-e89b-12d3-a456-426614174111", staged.evidence.single().evidenceId)
+    assertEquals(FakeInvestigationSessionApi.SESSION_ID, staged.evidence.single().sessionId)
+    assertEquals(0, api.analyzeCalls)
+  }
+
+  @Test
+  fun stageEvidenceReusesAnExistingSessionViaContinuationIdInsteadOfCreatingANewOne() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api)
+
+    val session = repository.stageEvidence(
+        InvestigationSubmissionDraft(
+            evidence = listOf(image("new.jpg")),
+            explanationText = "",
+            continuationSessionId = FakeInvestigationSessionApi.SESSION_ID,
+        ),
+    )
+
+    assertEquals(FakeInvestigationSessionApi.SESSION_ID, session.sessionId)
+    // Reused (getSession), never created a second session for an id the caller already has.
+    assertEquals(0, api.createSessionCalls)
+    assertEquals(listOf("new.jpg"), api.uploadedImageFilenames)
+  }
+
+  @Test
+  fun stageEvidenceWithNoNewEvidenceJustReturnsTheReusedSessionAndUploadsNothing() = runBlocking {
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api)
+
+    val session = repository.stageEvidence(
+        InvestigationSubmissionDraft(
+            evidence = emptyList(),
+            explanationText = "",
+            continuationSessionId = FakeInvestigationSessionApi.SESSION_ID,
+        ),
+    )
+
+    assertEquals(FakeInvestigationSessionApi.SESSION_ID, session.sessionId)
+    assertEquals(0, api.createSessionCalls)
+    assertTrue(api.uploadedImageFilenames.isEmpty())
+  }
+
+  @Test
+  fun repeatedStageEvidenceCallsReuseTheSameSessionRelyingOnBackendContentHashDedupForNoDuplicates() = runBlocking {
+    // Android's own contribution to "no duplicate evidence on retry" is session reuse (asserted
+    // here); actual de-duplication of re-uploaded identical bytes within one session is the
+    // backend evidence store's job (see investigations/evidence_store.py's upload_evidence content
+    // hash check - proven separately by the backend's own passing test suite at checkpoint
+    // 9cc0860), not reimplemented here. Android intentionally always re-stages current local
+    // evidence rather than tracking "already uploaded" state itself.
+    val api = FakeInvestigationSessionApi()
+    val repository = InvestigationSessionRepository(api = api)
+    val draft = InvestigationSubmissionDraft(
+        evidence = listOf(image("photo.jpg")),
+        explanationText = "Give me ideas for this room.",
+    )
+
+    val firstStage = repository.stageEvidence(draft)
+    val secondStage = repository.stageEvidence(draft.copy(continuationSessionId = firstStage.sessionId))
+
+    assertEquals(firstStage.sessionId, secondStage.sessionId)
+    // Exactly one createSession call across both attempts - the second reused the first's session.
+    assertEquals(1, api.createSessionCalls)
+    // Android re-sent the evidence both times (relying on backend dedup) rather than skipping it -
+    // this is the correct, intentional behavior, not a bug.
+    assertEquals(listOf("photo.jpg", "photo.jpg"), api.uploadedImageFilenames)
+  }
+
   private fun image(
       name: String,
       mimeType: String = "image/jpeg",

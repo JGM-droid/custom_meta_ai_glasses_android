@@ -16,6 +16,43 @@ import org.junit.Test
 class ProjectBackendClientTest {
 
   @Test
+  fun conversationLoadPreservesOrderedProjectScopedTurns() {
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val recorder = RequestRecorder(conversationResponseBody(projectId))
+    val api = HttpUrlProjectApi("http://10.0.2.2:8001", recorder::newConnection)
+
+    val conversation = runBlockingTest { api.getProjectConversation(projectId) }
+
+    assertEquals("/projects/$projectId/conversation", recorder.connection.url.path)
+    assertEquals(listOf(1, 2), conversation.turns.map { it.sequenceNumber })
+    assertEquals(listOf(ConversationRole.USER, ConversationRole.ASSISTANT), conversation.turns.map { it.role })
+    assertEquals("evidence-ignored", conversation.turns.first().evidenceRefs.first().evidenceId)
+  }
+
+  @Test
+  fun conversationSendUsesProviderNeutralEvidenceReferenceAndIdempotencyKey() {
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val recorder = RequestRecorder(conversationSendResponseBody(projectId))
+    val api = HttpUrlProjectApi("http://10.0.2.2:8001", recorder::newConnection)
+    val reference = ConversationEvidenceReference(
+        "33333333-3333-3333-3333-333333333333",
+        "44444444-4444-4444-4444-444444444444")
+
+    val result = runBlockingTest {
+      api.sendProjectConversationMessage(projectId, "What is visible?", listOf(reference), "stable-key")
+    }
+
+    val body = JSONObject(recorder.connection.output.toString(StandardCharsets.UTF_8.name()))
+    assertEquals("POST", recorder.connection.requestMethod)
+    assertEquals("stable-key", body.getString("idempotency_key"))
+    val sentRef = body.getJSONArray("evidence_refs").getJSONObject(0)
+    assertEquals("EVIDENCE", sentRef.getString("resource_kind"))
+    assertEquals(reference.evidenceId, sentRef.getString("resource_id"))
+    assertEquals(reference.investigationSessionId, sentRef.getString("container_id"))
+    assertEquals(2, result.turns.size)
+  }
+
+  @Test
   fun previewProgressSendsCanonicalProjectScopedRequest() {
     val projectId = "11111111-1111-1111-1111-111111111111"
     val key = "progress-key-1"
@@ -490,7 +527,190 @@ class ProjectBackendClientTest {
     assertEquals("POST", rejectRecorder.connection.requestMethod)
     assertEquals("/projects/$projectId/checkpoint-proposals/$proposalId/reject", rejectRecorder.connection.url.path)
   }
+
+  // --- Rich Project Intelligence V1 (ADR-059): typed EXPLORE_PLAN contract ---
+
+  @Test
+  fun unifiedGuidanceUsesThirtySecondReadTimeoutWhileOrdinaryApisRemainAtFifteenSeconds() {
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val guidanceRecorder = RequestRecorder(explorePlanAiResultBody(projectId))
+    val api = HttpUrlProjectApi("http://10.0.2.2:8001", guidanceRecorder::newConnection)
+
+    runBlockingTest { api.getProjectGuidance(projectId, "Redesign this room", null, "guidance-key") }
+
+    assertEquals(30_000, guidanceRecorder.connection.readTimeout)
+
+    val ordinaryRecorder = RequestRecorder(listProjectsResponseBody())
+    val ordinaryApi = HttpUrlProjectApi("http://10.0.2.2:8001", ordinaryRecorder::newConnection)
+    runBlockingTest { ordinaryApi.listProjects() }
+
+    assertEquals(15_000, ordinaryRecorder.connection.readTimeout)
+  }
+
+  @Test
+  fun createExplorePlanParsesTypedFieldsNeverIdeaDetails() {
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val recorder = RequestRecorder(explorePlanAiResultBody(projectId))
+    val api = HttpUrlProjectApi("http://10.0.2.2:8001", recorder::newConnection)
+
+    val result = runBlockingTest { api.createExplorePlan(projectId, "Give me three room directions", "key-1") }
+
+    assertEquals("POST", recorder.connection.requestMethod)
+    assertEquals("/projects/$projectId/ai-results/explore-plan", recorder.connection.url.path)
+    val body = JSONObject(recorder.connection.output.toString(StandardCharsets.UTF_8.name()))
+    assertEquals(setOf("user_intent", "input_refs", "idempotency_key"), body.keyNames())
+
+    val ready = result as ExplorePlanCreateResult.Ready
+    val plan = ready.result
+    assertEquals(projectId, plan.projectId)
+    assertEquals("interaction-1", plan.resultId)
+    assertTrue(plan.complete)
+    assertEquals(3, plan.options.size)
+    val recommended = plan.recommendedOption!!
+    assertEquals("Warm Modern", recommended.title)
+    assertEquals("Warm wood and soft neutral layers.", recommended.summary)
+    assertEquals("Supports a welcoming room.", recommended.rationale)
+    assertEquals("Needs material samples.", recommended.tradeoffs)
+    assertEquals("Layer warm wood tones with soft neutral textiles.", recommended.concept)
+    assertEquals("Add oak accents and warm-white lighting.", recommended.proposedChanges)
+    assertEquals("USD", recommended.estimatedCost!!.currency)
+    assertEquals(500.0, recommended.estimatedCost!!.minAmount!!, 0.001)
+    assertEquals(1200.0, recommended.estimatedCost!!.maxAmount!!, 0.001)
+    assertTrue(recommended.recommended)
+    assertEquals(listOf("Confirm budget range with the user."), plan.nextSteps.take(1))
+    assertEquals("3 design ideas ready. AI recommends Warm Modern.", plan.hudHeadline)
+    assertEquals(false, plan.hudUncertain)
+  }
+
+  @Test
+  fun createExplorePlanInformationRequestNeverFabricatesAReadyPlan() {
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val recorder = RequestRecorder(
+        """{"detail":{"category":"explore_plan_needs_more_information","message":"More information is needed before an EXPLORE_PLAN result can be created."}}""",
+        code = 422,
+    )
+    val api = HttpUrlProjectApi("http://10.0.2.2:8001", recorder::newConnection)
+
+    val result = runBlockingTest { api.createExplorePlan(projectId, "Give me ideas", "key-2") }
+
+    assertTrue(result is ExplorePlanCreateResult.InformationRequest)
+    assertEquals(
+        "More information is needed before an EXPLORE_PLAN result can be created.",
+        (result as ExplorePlanCreateResult.InformationRequest).prompt,
+    )
+  }
+
+  @Test
+  fun createExplorePlanRejectsAPlanReturnedForAnotherProject() {
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val recorder = RequestRecorder(explorePlanAiResultBody("22222222-2222-2222-2222-222222222222"))
+    val api = HttpUrlProjectApi("http://10.0.2.2:8001", recorder::newConnection)
+
+    try {
+      runBlockingTest { api.createExplorePlan(projectId, "Give me ideas", "key-3") }
+      fail("Expected a project_mismatch failure")
+    } catch (exc: ProjectApiException) {
+      assertEquals("project_mismatch", exc.category)
+    }
+  }
+
+  @Test
+  fun getExplorePlanReconstructsTheSameTypedPlanOnReopen() {
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val recorder = RequestRecorder(explorePlanAiResultBody(projectId))
+    val api = HttpUrlProjectApi("http://10.0.2.2:8001", recorder::newConnection)
+
+    val plan = runBlockingTest { api.getExplorePlan(projectId, "interaction-1") }
+
+    assertEquals("GET", recorder.connection.requestMethod)
+    assertEquals("/projects/$projectId/ai-results/explore-plan/interaction-1", recorder.connection.url.path)
+    assertEquals("interaction-1", plan.resultId)
+    assertEquals(3, plan.options.size)
+  }
+
+  @Test
+  fun selectExplorePlanOptionParsesBackendDerivedProposalWithoutBuildingOne() {
+    val projectId = "11111111-1111-1111-1111-111111111111"
+    val ideaId = "44444444-4444-4444-4444-444444444444"
+    val recorder = RequestRecorder(
+        """
+        {
+          "idea": {"activity_id":"$ideaId","project_id":"$projectId","activity_type":"idea","source_type":"ai","confirmation_status":"inferred","summary":"Warm Modern","occurred_at_utc":"2026-09-05T00:00:00Z","created_at_utc":"2026-09-05T00:00:00Z"},
+          "decision_activity": {"activity_id":"55555555-5555-5555-5555-555555555555","project_id":"$projectId","activity_type":"decision","source_type":"user","confirmation_status":"reported","summary":"Choose as preferred direction","occurred_at_utc":"2026-09-05T00:00:00Z","created_at_utc":"2026-09-05T00:00:00Z"},
+          "created": true,
+          "projection": {"project_id":"$projectId","option_sets":[],"preferred_direction":null,"canonical_checkpoint":{},"project_revision":3,"next_action":"Review the pending suggested Project change."},
+          "checkpoint_proposal": {
+            "schema_version":"1.0","proposal_id":"66666666-6666-6666-6666-666666666666","project_id":"$projectId",
+            "base_project_revision":3,"source_activity_ids":["$ideaId"],
+            "proposed_checkpoint_patch":{"current_work":"Selected direction: Warm Modern.","next_action":"Confirm budget range with the user."},
+            "reason":"User selected \"Warm Modern\" as the preferred direction; applying this proposal records that direction and its next step in canonical Project state.",
+            "status":"pending","created_at_utc":"2026-09-05T00:00:00Z"
+          }
+        }
+        """.trimIndent(),
+    )
+    val api = HttpUrlProjectApi("http://10.0.2.2:8001", recorder::newConnection)
+
+    val selection = runBlockingTest { api.selectExplorePlanOption(projectId, ideaId, "select-key-1") }
+
+    assertEquals("POST", recorder.connection.requestMethod)
+    assertEquals("/projects/$projectId/ideas/$ideaId/disposition", recorder.connection.url.path)
+    val body = JSONObject(recorder.connection.output.toString(StandardCharsets.UTF_8.name()))
+    assertEquals("select", body.getString("disposition"))
+    assertEquals(ideaId, selection.selectedIdeaId)
+    val proposal = selection.checkpointProposal!!
+    assertEquals("66666666-6666-6666-6666-666666666666", proposal.proposalId)
+    assertEquals("pending", proposal.status)
+    assertEquals(listOf(ideaId), proposal.sourceActivityIds)
+    assertEquals("Confirm budget range with the user.", proposal.proposedFields["next_action"])
+  }
 }
+
+private fun explorePlanAiResultBody(projectId: String): String =
+    """
+    {
+      "schema_version":"1.0","result_id":"interaction-1","project_id":"$projectId","result_type":"EXPLORE_PLAN",
+      "summary":"Three possible directions for the room.",
+      "hud_projection":{"headline":"3 design ideas ready. AI recommends Warm Modern.","next":"Confirm budget range with the user.","uncertainty_flag":false},
+      "evidence_refs":[], "suggested_project_updates":false, "ephemeral":false,
+      "troubleshoot":null, "general_guidance":null,
+      "explore_plan": {
+        "interaction_id":"interaction-1","idempotency_key":"key-1","complete":true,
+        "title":"Room directions","summary":"Three possible directions for the room.",
+        "observations":["The room currently reads as cold and under-furnished."],
+        "recommended_ordinal":1,
+        "recommendation_reason":"Warm Modern best matches the stated goal of a warmer, welcoming room.",
+        "next_steps":["Confirm budget range with the user.","Select material samples for the recommended direction."],
+        "follow_up_questions":["Is there an existing color palette to keep?"],
+        "options": [
+          {
+            "idea": {"activity_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","project_id":"$projectId","activity_type":"idea","source_type":"ai","confirmation_status":"inferred","summary":"Warm Modern","occurred_at_utc":"2026-09-05T00:00:00Z","created_at_utc":"2026-09-05T00:00:00Z"},
+            "interaction_id":"interaction-1","result_item_id":"opt-1","ordinal":1,
+            "disposition":null,"disposition_activity":null,"disposition_history":[],"promoted":false,"roadmap_activity":null,"related_proposals":[],
+            "summary":"Warm wood and soft neutral layers.","rationale":"Supports a welcoming room.","tradeoffs":"Needs material samples.",
+            "concept":"Layer warm wood tones with soft neutral textiles.","proposed_changes":"Add oak accents and warm-white lighting.",
+            "estimated_cost":{"currency":"USD","min_amount":500,"max_amount":1200,"qualifier":"rough estimate"},
+            "recommended":true
+          },
+          {
+            "idea": {"activity_id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","project_id":"$projectId","activity_type":"idea","source_type":"ai","confirmation_status":"inferred","summary":"Dark Contemporary","occurred_at_utc":"2026-09-05T00:00:00Z","created_at_utc":"2026-09-05T00:00:00Z"},
+            "interaction_id":"interaction-1","result_item_id":"opt-2","ordinal":2,
+            "disposition":null,"disposition_activity":null,"disposition_history":[],"promoted":false,"roadmap_activity":null,"related_proposals":[],
+            "summary":"Deep contrast with restrained accents.","rationale":null,"tradeoffs":null,"concept":null,"proposed_changes":null,"estimated_cost":null,
+            "recommended":false
+          },
+          {
+            "idea": {"activity_id":"cccccccc-cccc-cccc-cccc-cccccccccccc","project_id":"$projectId","activity_type":"idea","source_type":"ai","confirmation_status":"inferred","summary":"Minimal Natural","occurred_at_utc":"2026-09-05T00:00:00Z","created_at_utc":"2026-09-05T00:00:00Z"},
+            "interaction_id":"interaction-1","result_item_id":"opt-3","ordinal":3,
+            "disposition":null,"disposition_activity":null,"disposition_history":[],"promoted":false,"roadmap_activity":null,"related_proposals":[],
+            "summary":"Natural textures and a quiet palette.","rationale":null,"tradeoffs":null,"concept":null,"proposed_changes":null,"estimated_cost":null,
+            "recommended":false
+          }
+        ],
+        "result_activity": {"activity_id":"dddddddd-dddd-dddd-dddd-dddddddddddd","project_id":"$projectId","activity_type":"result","source_type":"ai","confirmation_status":"inferred","summary":"Room directions","occurred_at_utc":"2026-09-05T00:00:00Z","created_at_utc":"2026-09-05T00:00:00Z"}
+      }
+    }
+    """.trimIndent()
 
 private class RequestRecorder(private val body: String, private val code: Int = 200) {
   lateinit var connection: RecordingConnection
@@ -533,6 +753,17 @@ private fun listProjectsResponseBody(): String =
       {"project_id":"22222222-2222-2222-2222-222222222222","name":"Custom Meta AI Glasses","status":"active","updated_at_utc":"2026-08-21T10:00:00Z","current_objective":null,"next_action":null}
     ]
     """.trimIndent()
+
+private fun conversationResponseBody(projectId: String): String =
+    """
+    {"conversation_id":"22222222-2222-2222-2222-222222222222","project_id":"$projectId","turns":[
+      {"turn_id":"55555555-5555-5555-5555-555555555555","conversation_id":"22222222-2222-2222-2222-222222222222","project_id":"$projectId","sequence_number":1,"role":"USER","status":"COMPLETED","content_parts":[{"type":"TEXT","text":"What is visible?"},{"type":"PROJECT_RESOURCE_REFERENCE","resource_kind":"EVIDENCE","resource_id":"evidence-ignored","relationship":"ATTACHED","container_kind":"INVESTIGATION_SESSION","container_id":"session-ignored"}],"idempotency_key":"stable-key","request_fingerprint":"x","created_at_utc":"2026-09-06T00:00:00Z","completed_at_utc":"2026-09-06T00:00:00Z","provider_provenance":null,"failure_category":null,"failure_message":null,"schema_version":"1.0"},
+      {"turn_id":"66666666-6666-6666-6666-666666666666","conversation_id":"22222222-2222-2222-2222-222222222222","project_id":"$projectId","sequence_number":2,"role":"ASSISTANT","status":"COMPLETED","content_parts":[{"type":"TEXT","text":"A blue circle."}],"idempotency_key":"stable-key","request_fingerprint":"x","created_at_utc":"2026-09-06T00:00:01Z","completed_at_utc":"2026-09-06T00:00:01Z","provider_provenance":{"provider":"openai","model":"gpt-4.1-mini","request_id":null},"failure_category":null,"failure_message":null,"schema_version":"1.0"}
+    ]}
+    """.trimIndent()
+
+private fun conversationSendResponseBody(projectId: String): String =
+    JSONObject(conversationResponseBody(projectId)).apply { put("reconstructed", false) }.toString()
 
 private fun getProjectResponseBody(id: String, currentWork: String?, nextAction: String?): String {
   val currentWorkJson = if (currentWork == null) "null" else "\"$currentWork\""

@@ -8,10 +8,14 @@
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.display
 
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ExplorePlanCreateResult
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ExplorePlanResult
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ExplorePlanSelection
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.NewProjectRequest
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectAskAnswer
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectIdeasExecutionResult
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectIdeasProjection
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectGuidanceOutcome
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectOverview
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectProgressPreview
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectProgressRequest
@@ -95,4 +99,20 @@ internal class FakeProjectRepository(initialOverview: ProjectOverview) : Project
 
   override suspend fun rejectCheckpointProposal(projectId: String, proposalId: String): Unit =
       error("Not used by ProjectContinuityHudController")
+
+  override suspend fun createExplorePlan(projectId: String, userIntent: String, idempotencyKey: String): ExplorePlanCreateResult =
+      error("Not used by ProjectContinuityHudController")
+
+  override suspend fun getExplorePlan(projectId: String, resultId: String): ExplorePlanResult =
+      error("Not used by ProjectContinuityHudController")
+
+  override suspend fun selectExplorePlanOption(projectId: String, ideaId: String, idempotencyKey: String): ExplorePlanSelection =
+      error("Not used by ProjectContinuityHudController")
+
+  override suspend fun getProjectGuidance(
+      projectId: String,
+      userRequest: String,
+      investigationSessionId: String?,
+      idempotencyKey: String,
+  ): ProjectGuidanceOutcome = error("Not used by ProjectContinuityHudController")
 }

@@ -79,6 +79,9 @@ internal fun CameraAccessScaffold(
     sourceProjectId: String? = null,
     sourceProjectName: String? = null,
     continuationSessionId: String? = null,
+    // ADR-061 conversation handoff - see StreamScreen's own doc on this identical param. Simply
+    // forwarded through; this scaffold makes no decision based on it itself.
+    returnToConversation: Boolean = false,
     onReturnToSourceProject: (() -> Unit)? = null,
     onProjectHudPhoneHandoff: ((destination: ProjectHudPhoneDestination, continuationSessionId: String?) -> Unit)? = null,
 ) {
@@ -103,6 +106,7 @@ internal fun CameraAccessScaffold(
                 sourceProjectId = sourceProjectId,
                 sourceProjectName = sourceProjectName,
                 continuationSessionId = continuationSessionId,
+                returnToConversation = returnToConversation,
                 onReturnToSourceProject = onReturnToSourceProject,
                 onProjectHudPhoneHandoff = onProjectHudPhoneHandoff,
             )

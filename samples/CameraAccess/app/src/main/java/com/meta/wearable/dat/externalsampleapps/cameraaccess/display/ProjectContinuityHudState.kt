@@ -43,6 +43,12 @@ internal data class ProjectHudContent(
     val latestGuidance: String?,
     val attentionSummary: String?,
     val pendingTrustReview: ProjectHudPendingTrustReview? = null,
+    // Rich Project Intelligence V1 (ADR-059) bounded HUD projection - see
+    // ProjectHudExplorePlanSummary's doc. Null whenever this Project has no complete EXPLORE_PLAN
+    // interaction yet, or once its selected direction has already been applied (at that point
+    // whereWeLeftOff/nextAction above already reflect it - the canonical Checkpoint, not a second
+    // Explore-specific projection, becomes the single source of truth for that state).
+    val explorePlan: ProjectHudExplorePlanSummary? = null,
 ) {
   val isEmpty: Boolean
     get() =
@@ -50,11 +56,27 @@ internal data class ProjectHudContent(
             nextAction == null &&
             evidenceCount == 0 &&
             latestGuidance == null &&
-            attentionSummary == null
+            attentionSummary == null &&
+            explorePlan == null
 
   val hasAdditionalDetails: Boolean
     get() = evidenceCount > 0 || latestGuidance != null
 }
+
+/**
+ * The two bounded EXPLORE_PLAN HUD states this Project can be in - never full option cards,
+ * rationale, or tradeoffs (see ProjectContinuityHudController's overview()/details() doc: this is
+ * exactly the concise headline/next pair the backend's own ProjectAIResult.hud_projection already
+ * bounds, re-derived here from the same canonical Explore read projection + pendingProposals
+ * ProjectOverview already carries - never a second Android-owned Explore/proposal store). The
+ * third target state ("after Apply: selected direction + canonical Next") needs no dedicated field
+ * here - it is exactly what whereWeLeftOff/nextAction above already show once Apply has run, so a
+ * third variant would just duplicate the canonical Checkpoint the HUD already renders.
+ */
+internal data class ProjectHudExplorePlanSummary(
+    val headline: String,
+    val awaitingApplyReview: Boolean,
+)
 
 /**
  * An AI analysis result the canonical backend already holds for this Project that no trust
@@ -202,6 +224,21 @@ internal class ProjectContinuityHudStateMachine {
   var evidenceAcceptedThisSession: Boolean = false
     private set
 
+  // ADR-061 conversation handoff: true once control for THIS glasses session has moved to the
+  // phone - either the user tapped Continue on phone (phoneHandoff() below) or the phone
+  // consumed an accepted glasses capture into a Project conversation (acknowledgePhoneControl()).
+  // renderState() checks this FIRST, before any other screen, and shows a bare neutral "Continue
+  // on phone" projection with no actions at all - never Capture/Analyze/Use/Retake - since the
+  // phone conversation is now authoritative for this interaction (see class doc: this HUD is a
+  // lossy projection/controller, not a second canonical state store). acceptAction() also refuses
+  // every generation-guarded action once this is true, so even a stale/lingering physical frame
+  // (the DAT display can visibly hold its last frame briefly after a capability is removed - see
+  // ProjectContinuityHudController.detach()) can never actually DO anything if tapped. Reset only
+  // in selectProject() - the same explicit-Project boundary every other per-session field here
+  // already resets at.
+  var phoneControlActive: Boolean = false
+    private set
+
   var analysisStatus: ProjectHudAnalysisStatus = ProjectHudAnalysisStatus.Idle
     private set
 
@@ -211,17 +248,39 @@ internal class ProjectContinuityHudStateMachine {
   private var consumedActions = mutableSetOf<String>()
   private var lastReadyContent: ProjectHudContent? = null
 
-  fun selectProject(projectId: String, projectName: String): ProjectHudLoadRequest {
+  // ADR-061 conversation handoff, stale-trust fix: true for a glasses session entered from
+  // Project Conversation (see StreamScreen's returnToConversation/StreamViewModel.
+  // configureProjectHud's identically-named param - this field is this pure state machine's own,
+  // UI-vocabulary-free name for the same fact). mapOverview() never populates
+  // ProjectHudContent.pendingTrustReview while this is true, so a historical, still-undecided
+  // legacy Investigation for this Project (real, proven physical bug: it stays undecided
+  // indefinitely once its own session is no longer being continued, so it would otherwise
+  // resurface FOREVER, on every load/refresh, for a conversation session that has nothing to do
+  // with it) can never hijack renderState()'s precedence away from a fresh capture-ready screen.
+  // The trust record itself is never touched, deleted, or reinterpreted - only whether THIS HUD
+  // session's own content projects it as a decision point. Reset in selectProject() as its own
+  // explicit parameter (not a leftover flag) since, unlike every other per-session field below,
+  // its correct value for a NEW session depends on how that new session was entered, not simply
+  // "always false at a fresh boundary".
+  private var suppressLegacyTrustReview: Boolean = false
+
+  fun selectProject(
+      projectId: String,
+      projectName: String,
+      suppressLegacyTrustReview: Boolean = false,
+  ): ProjectHudLoadRequest {
     require(projectId.isNotBlank()) { "The HUD requires an explicit project_id." }
     if (selectedProjectId != projectId) lastReadyContent = null
     selectedProjectId = projectId
     selectedProjectName = projectName
+    this.suppressLegacyTrustReview = suppressLegacyTrustReview
     // A newly selected explicit Project can never inherit a capture/analysis status left over
     // from whichever Project (or no Project) the HUD was previously attached to.
     captureStatus = ProjectHudCaptureStatus.Idle
     analysisEligibility = ProjectHudAnalysisEligibility()
     analysisStatus = ProjectHudAnalysisStatus.Idle
     evidenceAcceptedThisSession = false
+    phoneControlActive = false
     uiState = ProjectHudUiState.Loading(projectId, projectName)
     advanceRender()
     return nextRequest(projectId, projectName)
@@ -247,7 +306,7 @@ internal class ProjectContinuityHudStateMachine {
 
   fun accept(request: ProjectHudLoadRequest, overview: ProjectOverview): Boolean {
     if (!isCurrent(request) || overview.project.projectId != request.projectId) return false
-    val content = mapOverview(overview, request.projectName)
+    val content = mapOverview(overview, request.projectName, suppressLegacyTrustReview)
     lastReadyContent = content
     uiState = ProjectHudUiState.Ready(content)
     advanceRender()
@@ -313,6 +372,12 @@ internal class ProjectContinuityHudStateMachine {
   fun phoneHandoff(generation: Long): ProjectHudPhoneHandoff? {
     if (!acceptAction(generation, "phone")) return null
     val projectId = selectedProjectId ?: return null
+    // Set synchronously, before returning - the caller renders the neutral handoff screen (see
+    // phoneControlActive's doc) and only THEN tears down the Display, so the glasses' last-shown
+    // frame is always this neutral one, never whatever interactive screen was up when the user
+    // tapped Continue on phone.
+    phoneControlActive = true
+    advanceRender()
     return ProjectHudPhoneHandoff(
         projectId = projectId,
         destination =
@@ -324,6 +389,21 @@ internal class ProjectContinuityHudStateMachine {
               ProjectHudPhoneDestination.PROJECT_DETAIL
             },
     )
+  }
+
+  /**
+   * The OTHER trigger for the same neutral handoff (see phoneControlActive's doc): the phone
+   * consumed an accepted glasses capture into a Project conversation WITHOUT necessarily going
+   * through a fresh phoneHandoff() tap (e.g. Continue on phone already ran once earlier in this
+   * same glasses sitting). Not generation-guarded like the dispatch* actions above - this is a
+   * phone-side event, not a HUD button tap - but still idempotent: a second call once already
+   * active is a no-op, matching every other "settle into a terminal state" method here.
+   */
+  fun acknowledgePhoneControl(): Boolean {
+    if (selectedProjectId == null || phoneControlActive) return false
+    phoneControlActive = true
+    advanceRender()
+    return true
   }
 
   fun acceptRefresh(generation: Long): ProjectHudLoadRequest? {
@@ -491,6 +571,9 @@ internal class ProjectContinuityHudStateMachine {
   }
 
   private fun acceptAction(generation: Long, action: String): Boolean {
+    // Once control has moved to the phone, every generation-guarded action is refused, not just
+    // visually replaced - see phoneControlActive's doc for why this matters beyond rendering.
+    if (phoneControlActive) return false
     if (generation != renderGeneration) return false
     return consumedActions.add("$generation:$action")
   }
@@ -501,7 +584,11 @@ internal class ProjectContinuityHudStateMachine {
   }
 
   companion object {
-    fun mapOverview(overview: ProjectOverview, fallbackProjectName: String): ProjectHudContent {
+    fun mapOverview(
+        overview: ProjectOverview,
+        fallbackProjectName: String,
+        suppressPendingTrustReview: Boolean = false,
+    ): ProjectHudContent {
       val proposalCount = overview.pendingProposals.size
       val attention =
           when {
@@ -521,13 +608,27 @@ internal class ProjectContinuityHudStateMachine {
       // A HUD decision point only while no trust decision has been recorded yet - once one has,
       // this naturally disappears on the next refresh without the HUD needing to track "already
       // decided" itself; it is simply reading the same canonical field the phone already does.
+      //
+      // Proven physical bug this suppression closes: an investigation left undecided (no trust
+      // decision ever recorded against it - a real, indefinite state, not a transient one) would
+      // otherwise resurface as a full-HUD decision point on EVERY load/refresh for this Project
+      // forever, including for a Project Conversation glasses session that has nothing to do with
+      // that old investigation and never asked to see it. suppressPendingTrustReview never alters
+      // the record itself (still exactly the same overview.latestInvestigation, still undecided,
+      // still fully visible/actionable the moment someone genuinely re-enters the legacy
+      // Investigation/trust workflow for it) - only whether THIS load's own content projects it as
+      // a decision point.
       val pendingTrustReview =
-          investigation?.takeIf { it.trustDecision == null }?.let {
-            ProjectHudPendingTrustReview(
-                sessionId = it.sessionId,
-                hypothesis = it.hypothesis,
-                recommendedNextAction = it.recommendedNextAction,
-            )
+          if (suppressPendingTrustReview) {
+            null
+          } else {
+            investigation?.takeIf { it.trustDecision == null }?.let {
+              ProjectHudPendingTrustReview(
+                  sessionId = it.sessionId,
+                  hypothesis = it.hypothesis,
+                  recommendedNextAction = it.recommendedNextAction,
+              )
+            }
           }
       return ProjectHudContent(
           projectId = overview.project.projectId,
@@ -538,7 +639,33 @@ internal class ProjectContinuityHudStateMachine {
           latestGuidance = latestGuidance,
           attentionSummary = attention,
           pendingTrustReview = pendingTrustReview,
+          explorePlan = mapExplorePlanSummary(overview),
       )
+    }
+
+    /**
+     * Bounded three-state EXPLORE_PLAN HUD projection - see ProjectHudExplorePlanSummary's doc for
+     * why the third ("applied") state needs no field of its own here.
+     */
+    private fun mapExplorePlanSummary(overview: ProjectOverview): ProjectHudExplorePlanSummary? {
+      val plan = overview.latestExplorePlan ?: return null
+      return when {
+        plan.selectedOptionTitle != null && plan.hasPendingSelectionProposal ->
+            ProjectHudExplorePlanSummary(
+                headline = "Selected direction: ${plan.selectedOptionTitle} — awaiting review on your phone.",
+                awaitingApplyReview = true,
+            )
+        // Selected but no longer pending: already applied - whereWeLeftOff/nextAction now cover
+        // it, so no separate Explore-specific headline is shown (avoids a stale duplicate banner).
+        plan.selectedOptionTitle != null -> null
+        else ->
+            ProjectHudExplorePlanSummary(
+                headline = "3 design ideas ready." +
+                    (plan.recommendedOptionTitle?.let { " AI recommends $it." } ?: "") +
+                    " Review on phone.",
+                awaitingApplyReview = false,
+            )
+      }
     }
   }
 }

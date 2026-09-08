@@ -79,12 +79,19 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.hasAc
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.investigationReopenAffordanceLabel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.investigationViewModelKey
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ActiveProjectActionState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ExplorePlanApplyState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ExplorePlanUiState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ExplorePlanViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailUiState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectDetailViewModel
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectGuidanceResult
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectGuidanceUiState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectGuidanceViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectOverview
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProposalActionState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.SavedInvestigationReview
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.VisualArtifactViewModel
 import kotlinx.coroutines.launch
 
 internal enum class ProjectPrimaryAction { ADD_EVIDENCE, REVIEW_CHANGES, USE_GLASSES }
@@ -194,6 +201,31 @@ fun ProjectDetailScreen(
         val primaryAction = projectPrimaryAction(overview)
         val proposalRequester = remember { BringIntoViewRequester() }
         val scope = rememberCoroutineScope()
+        // Hoisted here (not inside ExplorePlanSection) so ContinueInvestigationSection's panel can
+        // trigger the SAME instance via ADR-060's automatic guidance routing (adoptExternallyProducedPlan,
+        // dispatched from the guidanceUiState LaunchedEffect below - never an explicit mode-selector
+        // button, which ADR-060 removed) - one Explore-plan session per Project, reachable from either
+        // surface.
+        val explorePlanApplication = LocalContext.current.applicationContext as Application
+        val explorePlanViewModel: ExplorePlanViewModel =
+            viewModel(
+                key = "explore-plan:${project.projectId}",
+                factory = ExplorePlanViewModel.Factory(application = explorePlanApplication, projectId = project.projectId),
+            )
+        // ADR-060: hoisted here (not inside ContinueInvestigationSection) for the same reason
+        // explorePlanViewModel is - a fresh instance per distinct Project, not recreated on every
+        // sheet open/close, so its Requesting/ClarificationNeeded/Failed state survives exactly as
+        // long as the user is still working the SAME guidance request.
+        val guidanceViewModel: ProjectGuidanceViewModel =
+            viewModel(
+                key = "project-guidance:${project.projectId}",
+                factory = ProjectGuidanceViewModel.Factory(application = explorePlanApplication, projectId = project.projectId),
+            )
+        val visualArtifactViewModel: VisualArtifactViewModel =
+            viewModel(
+                key = "visual-artifacts:${project.projectId}",
+                factory = VisualArtifactViewModel.Factory(explorePlanApplication, project.projectId),
+            )
         LaunchedEffect(focusPendingReview, overview.pendingProposals.size) {
           if (focusPendingReview && overview.pendingProposals.isNotEmpty()) {
             proposalRequester.bringIntoView()
@@ -248,8 +280,28 @@ fun ProjectDetailScreen(
             // (SavedInvestigationSection below reads it) - reload so returning from the sheet shows
             // it fresh rather than whatever this screen's own overview fetch last saw.
             onInvestigationDecided = viewModel::loadOverview,
+            explorePlanViewModel = explorePlanViewModel,
+            guidanceViewModel = guidanceViewModel,
+            visualArtifactViewModel = visualArtifactViewModel,
         )
 
+        ExplorePlanSection(
+            explorePlanViewModel = explorePlanViewModel,
+            visualArtifactViewModel = visualArtifactViewModel,
+            existingResultId = overview.latestExplorePlan?.resultId,
+            // Apply/Reject changes the CANONICAL checkpoint/pendingProposals list this screen also
+            // reads below - reload so both this section's own state and the generic pending-changes
+            // safety net (PendingProposalsSection) reflect it, same reasoning as onInvestigationDecided.
+            onProjectChanged = viewModel::loadOverview,
+        )
+
+        // Deliberately NOT filtered to exclude Explore-selection proposals: ExplorePlanSection
+        // above reviews/applies those inline once ITS OWN ViewModel has reconstructed them (see
+        // ExplorePlanViewModel.reconcileSelectionFromCanonicalState), but that reconstruction is
+        // best-effort and can legitimately fail or not have run yet (e.g. right after process
+        // death). This generic, always-on safety net guarantees a pending proposal remains
+        // reachable and Apply-able even then - occasionally showing the same proposal in both
+        // places is an accepted minor redundancy, never an unreachable one.
         if (overview.pendingProposals.isNotEmpty()) {
           PendingProposalsSection(
               proposals = overview.pendingProposals,
@@ -285,7 +337,7 @@ fun ProjectDetailScreen(
             colors =
                 ButtonDefaults.outlinedButtonColors(contentColor = AppColor.Accent),
         ) {
-          Text("Open Project workspace", fontWeight = FontWeight.SemiBold)
+          Text("Open Project tools", fontWeight = FontWeight.SemiBold)
         }
       }
     }
@@ -337,6 +389,14 @@ private fun ContinueInvestigationSection(
     focusActiveInvestigation: Boolean,
     onResumeOnGlasses: (String?) -> Unit,
     onInvestigationDecided: () -> Unit = {},
+    // Rich Project Intelligence V1 (ADR-059) Bug 2 fix: the SAME hoisted instance
+    // ExplorePlanSection uses (see ProjectDetailScreen's Loaded branch) - never a second,
+    // independent Explore-plan session for this Project.
+    explorePlanViewModel: ExplorePlanViewModel,
+    // ADR-060: the SAME hoisted instance for this Project - one Get Guidance request lifecycle,
+    // never a second competing one.
+    guidanceViewModel: ProjectGuidanceViewModel,
+    visualArtifactViewModel: VisualArtifactViewModel,
     modifier: Modifier = Modifier,
 ) {
   val application = LocalContext.current.applicationContext as Application
@@ -354,8 +414,41 @@ private fun ContinueInvestigationSection(
   if (!hasActiveInvestigation(investigationUiState)) return
 
   var isPanelVisible by remember { mutableStateOf(false) }
+  // ADR-060: no longer an explicit, user-picked toggle - it now follows the backend's own Response
+  // Planner decision (guidanceUiState below) automatically. Reset per sheet-open so reopening this
+  // sheet later always starts back on the single guidance composer.
+  var showingExplorePlan by remember { mutableStateOf(false) }
+  val guidanceUiState by guidanceViewModel.uiState.collectAsState()
   LaunchedEffect(focusActiveInvestigation) {
     if (focusActiveInvestigation) isPanelVisible = true
+  }
+
+  // ADR-060: dispatches a Ready guidance result to wherever it belongs, automatically - the user
+  // never chooses TROUBLESHOOT/EXPLORE_PLAN/GENERAL_GUIDANCE themselves.
+  LaunchedEffect(guidanceUiState) {
+    val ready = guidanceUiState as? ProjectGuidanceUiState.Ready ?: return@LaunchedEffect
+    when (val result = ready.result) {
+      is ProjectGuidanceResult.ExplorePlan -> {
+        // Hands off to the existing, unchanged rich 3-option panel/state machine - Select ->
+        // Proposal -> Apply remains entirely explorePlanViewModel's own from here.
+        explorePlanViewModel.adoptExternallyProducedPlan(result.result)
+        showingExplorePlan = true
+        guidanceViewModel.reset()
+      }
+      is ProjectGuidanceResult.TroubleshootEvidence -> {
+        // The backend already ran the existing evidence-backed Investigation analyze pipeline for
+        // this request. Close back onto the plain Project Detail page and reload so the existing
+        // SavedInvestigationSection/trust UI (Looks right / Add more info / Not quite) - already
+        // driven by ProjectOverview.latestInvestigation - picks it up exactly as it already does
+        // for any completed Investigation. Never a second, duplicate trust surface here.
+        isPanelVisible = false
+        guidanceViewModel.reset()
+        onInvestigationDecided()
+      }
+      // TroubleshootText/GeneralGuidance render inline within BackendInvestigationPanel's own
+      // guidance param below - nothing to dispatch here.
+      else -> Unit
+    }
   }
 
   OutlinedButton(
@@ -369,10 +462,54 @@ private fun ContinueInvestigationSection(
 
   if (isPanelVisible) {
     ModalBottomSheet(
-        onDismissRequest = { isPanelVisible = false },
+        onDismissRequest = {
+          isPanelVisible = false
+          showingExplorePlan = false
+          guidanceViewModel.reset()
+        },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     ) {
-      Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+      Column(
+          modifier =
+              Modifier.fillMaxWidth()
+                  // BackendInvestigationPanel owns its scroll while the composer/diagnostic
+                  // surface is showing. EXPLORE_PLAN replaces that panel entirely, so this
+                  // sheet branch must become the sole vertical scroll owner or options below
+                  // the first viewport (including expanded details and Proposal/Apply) are
+                  // unreachable on a physical phone.
+                  .then(
+                      if (showingExplorePlan) Modifier.verticalScroll(rememberScrollState())
+                      else Modifier,
+                  )
+                  .padding(horizontal = 4.dp),
+      ) {
+        if (showingExplorePlan) {
+          TextButton(onClick = { showingExplorePlan = false }) {
+            Text("‹ Back to diagnostic view")
+          }
+          val planState by explorePlanViewModel.planState.collectAsState()
+          val selectionState by explorePlanViewModel.selectionState.collectAsState()
+          val applyState by explorePlanViewModel.applyState.collectAsState()
+          val visualStates by visualArtifactViewModel.states.collectAsState()
+          val existingResultId = (planState as? ExplorePlanUiState.Ready)?.result?.resultId
+          LaunchedEffect(applyState) {
+            if (applyState is ExplorePlanApplyState.Applied) onInvestigationDecided()
+          }
+          ExplorePlanPanel(
+              planState = planState,
+              selectionState = selectionState,
+              applyState = applyState,
+              onRequestPlan = explorePlanViewModel::requestPlan,
+              onSelectOption = explorePlanViewModel::selectOption,
+              onApply = explorePlanViewModel::applySelection,
+              onDismissProposal = explorePlanViewModel::dismissSelection,
+              onRetry = { existingResultId?.let(explorePlanViewModel::retry) },
+              visualStates = visualStates,
+              onVisualizeOption = visualArtifactViewModel::visualize,
+              modifier = Modifier.fillMaxWidth(),
+          )
+          return@Column
+        }
         BackendInvestigationPanel(
             modifier = Modifier.fillMaxWidth(),
             viewModel = investigationViewModel,
@@ -386,6 +523,20 @@ private fun ContinueInvestigationSection(
               isPanelVisible = false
               onInvestigationDecided()
             },
+            // ADR-060: ONE natural guidance action, wired to the shared guidanceViewModel - see
+            // this file's dispatch LaunchedEffect above and BackendInvestigationPanel's own doc.
+            // stageEvidence runs first (multimodal bridge - see ProjectGuidanceViewModel.getGuidance's
+            // doc and InvestigationSessionDebugViewModel.stagePendingEvidenceForGuidance) so any
+            // accepted pending photo is backend-available before the single routed reasoning call.
+            guidance = ProjectGuidanceComposerState(
+                uiState = guidanceUiState,
+                onGetGuidance = {
+                  guidanceViewModel.getGuidance(
+                      userRequest = investigationUiState.explanationText,
+                      stageEvidence = investigationViewModel::stagePendingEvidenceForGuidance,
+                  )
+                },
+            ),
         )
         val productState = remember(investigationUiState) { deriveInvestigationProductState(investigationUiState) }
         if (productState.canAnalyze) {
@@ -404,6 +555,66 @@ private fun ContinueInvestigationSection(
       }
     }
   }
+}
+
+/**
+ * Rich Project Intelligence V1 (ADR-059) phone entry point: "request design/planning guidance ->
+ * render 3 rich options -> SELECT -> proposal review -> Apply -> canonical reload". Reuses
+ * ExplorePlanViewModel keyed per-Project the same way ContinueInvestigationSection above keys its
+ * own InvestigationSessionDebugViewModel - a fresh instance per distinct project.projectId, never
+ * shared across Projects.
+ *
+ * [existingResultId] (from ProjectOverview.latestExplorePlan, itself derived from the backend's
+ * existing canonical Explore read projection - see ProjectBackendClient.loadLatestExplorePlanSummary)
+ * reconstructs a previously-generated plan on reopen rather than requiring the user to ask again -
+ * "prefer canonical backend reload over local duplication".
+ *
+ * [explorePlanViewModel] is hoisted by the caller (ProjectDetailScreen), NOT created here - it is
+ * the SAME instance ContinueInvestigationSection's panel can also trigger via ADR-060's automatic
+ * guidance routing (never an explicit mode-selector button, which ADR-060 removed - see
+ * ProjectGuidanceViewModel), so a plan requested from either surface is immediately visible from
+ * the other, with exactly one Explore-plan session per Project rather than two independent,
+ * possibly-diverging ones.
+ */
+@Composable
+private fun ExplorePlanSection(
+    explorePlanViewModel: ExplorePlanViewModel,
+    visualArtifactViewModel: VisualArtifactViewModel,
+    existingResultId: String?,
+    onProjectChanged: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+  val planState by explorePlanViewModel.planState.collectAsState()
+  val selectionState by explorePlanViewModel.selectionState.collectAsState()
+  val applyState by explorePlanViewModel.applyState.collectAsState()
+  val visualStates by visualArtifactViewModel.states.collectAsState()
+
+  LaunchedEffect(existingResultId) {
+    if (existingResultId != null && planState is ExplorePlanUiState.Idle) {
+      explorePlanViewModel.loadExistingPlan(existingResultId)
+    }
+  }
+  // Apply/Reject changed canonical Project state - refresh the outer screen (checkpoint,
+  // pendingProposals) exactly once per completed action, not on every recomposition.
+  LaunchedEffect(applyState) {
+    if (applyState is ExplorePlanApplyState.Applied) {
+      onProjectChanged()
+    }
+  }
+
+  ExplorePlanPanel(
+      planState = planState,
+      selectionState = selectionState,
+      applyState = applyState,
+      onRequestPlan = explorePlanViewModel::requestPlan,
+      onSelectOption = explorePlanViewModel::selectOption,
+      onApply = explorePlanViewModel::applySelection,
+      onDismissProposal = explorePlanViewModel::dismissSelection,
+      onRetry = { existingResultId?.let(explorePlanViewModel::retry) },
+      visualStates = visualStates,
+      onVisualizeOption = visualArtifactViewModel::visualize,
+      modifier = modifier,
+  )
 }
 
 @Composable

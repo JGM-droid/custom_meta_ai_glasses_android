@@ -148,7 +148,16 @@ class ProjectDetailViewModel(
   }
 
   fun loadOverview() {
-    _uiState.update { ProjectDetailUiState.Loading }
+    // Only clears to Loading for the very first fetch - an in-place refresh (e.g. after a
+    // decision is dispatched: onInvestigationDecided/onProjectChanged below) must never flash the
+    // whole Loaded branch away and back. Composables under it (e.g.
+    // ContinueInvestigationSection's isPanelVisible) are `remember`-ed there, and destroying that
+    // branch even briefly discards that local state and re-runs its mount-time LaunchedEffects -
+    // which reopens the guidance sheet right after it was correctly dismissed, since
+    // focusActiveInvestigation doesn't itself change on a refresh.
+    if (_uiState.value !is ProjectDetailUiState.Loaded) {
+      _uiState.update { ProjectDetailUiState.Loading }
+    }
     viewModelScope.launch {
       try {
         val overview = withContext(Dispatchers.IO) { repository.getProjectOverview(projectId) }

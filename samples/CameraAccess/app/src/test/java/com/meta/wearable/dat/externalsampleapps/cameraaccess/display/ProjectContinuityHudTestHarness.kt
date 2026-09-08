@@ -78,8 +78,12 @@ internal class ProjectContinuityHudTestHarness(initialOverview: ProjectOverview)
   val stateMachine: ProjectContinuityHudStateMachine
     get() = controller.stateMachine
 
-  suspend fun openProject(projectId: String, projectName: String) {
-    controller.selectProject(projectId, projectName)
+  suspend fun openProject(
+      projectId: String,
+      projectName: String,
+      suppressLegacyTrustReview: Boolean = false,
+  ) {
+    controller.selectProject(projectId, projectName, suppressLegacyTrustReview)
     settle()
   }
 

@@ -15,6 +15,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProjectContinuityHudContractTest {
+  @Test
+  fun streamCapabilityIsAddedBeforeHudDisplayAttachmentOnTheSharedSession() {
+    val source = File(root, "stream/StreamViewModel.kt").readText()
+    val startedBranch = source.substringAfter("if (currentState == DeviceSessionState.STARTED)")
+        .substringBefore("} else if (currentState == DeviceSessionState.PAUSED)")
+    assertTrue(startedBranch.indexOf("?.addStream(") in 0 until startedBranch.indexOf("projectHudController::attachTo"))
+  }
+
   private val root = File("src/main/java/com/meta/wearable/dat/externalsampleapps/cameraaccess")
 
   @Test

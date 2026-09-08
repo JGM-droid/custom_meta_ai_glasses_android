@@ -60,6 +60,16 @@ interface ProjectApi {
   /** Read-only: asks THIS project's real backend Q&A route a question. Never mutates Project state. */
   suspend fun askProject(projectId: String, question: String): ProjectAskAnswer
 
+  suspend fun getProjectConversation(projectId: String): ProjectConversation =
+      throw UnsupportedOperationException("Project conversation is unavailable.")
+
+  suspend fun sendProjectConversationMessage(
+      projectId: String,
+      text: String,
+      evidenceRefs: List<ConversationEvidenceReference>,
+      idempotencyKey: String,
+  ): ConversationSendResult = throw UnsupportedOperationException("Project conversation is unavailable.")
+
   suspend fun previewProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressPreview
 
   suspend fun saveProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressSaveResult
@@ -75,6 +85,53 @@ interface ProjectApi {
   suspend fun applyCheckpointProposal(projectId: String, proposalId: String)
 
   suspend fun rejectCheckpointProposal(projectId: String, proposalId: String)
+
+  // --- Rich Project Intelligence V1 (ADR-059): typed EXPLORE_PLAN contract ---
+  // POST/GET /projects/{project_id}/ai-results/explore-plan[/{result_id}] - the ProjectAIResult
+  // presentation envelope (see code/prototype_v1/projects/project_ai_result.py). Every field is
+  // read from typed JSON; idea.details (the backend-private persistence encoding) is never parsed.
+
+  /** Requests a new EXPLORE_PLAN interaction. Ready unless the provider needs more information. */
+  suspend fun createExplorePlan(projectId: String, userIntent: String, idempotencyKey: String): ExplorePlanCreateResult
+
+  /** Reconstructs one EXPLORE_PLAN interaction from canonical state - safe to call any time, e.g. after reopening the Project. */
+  suspend fun getExplorePlan(projectId: String, resultId: String): ExplorePlanResult
+
+  /**
+   * Selects one EXPLORE_PLAN option via the backend's existing generic disposition route (the
+   * same route the legacy Ideas panel already uses - see setProjectIdeaDisposition above). The
+   * backend derives the CheckpointProposal, if any; this client only reads what came back.
+   */
+  suspend fun selectExplorePlanOption(projectId: String, ideaId: String, idempotencyKey: String): ExplorePlanSelection
+
+  suspend fun createVisualArtifact(projectId: String, resultId: String, optionId: String, idempotencyKey: String): VisualArtifact =
+      throw UnsupportedOperationException("Visual artifacts are unavailable.")
+  suspend fun getVisualArtifact(projectId: String, resultId: String, optionId: String, artifactId: String): VisualArtifact =
+      throw UnsupportedOperationException("Visual artifacts are unavailable.")
+  suspend fun retryVisualArtifact(projectId: String, resultId: String, optionId: String, artifactId: String, idempotencyKey: String): VisualArtifact =
+      throw UnsupportedOperationException("Visual artifacts are unavailable.")
+  suspend fun getVisualArtifactImages(projectId: String, resultId: String, optionId: String, artifactId: String): VisualArtifactImages =
+      throw UnsupportedOperationException("Visual artifacts are unavailable.")
+
+  // --- ADR-060: unified, planner-selected Project guidance ---
+  // POST /projects/{project_id}/ai-results - the caller never names a response family; the
+  // backend's Response Planner infers TROUBLESHOOT | EXPLORE_PLAN | GENERAL_GUIDANCE from bounded
+  // Project context and this request. investigationSessionId is passed through UNCHANGED when the
+  // caller has one (never fabricated when absent) - see project_ai_result.py's
+  // ProjectAIResultPlanner._dispatch_troubleshoot for how the backend owns its semantics.
+
+  /**
+   * Returns [ProjectGuidanceOutcome.NeedsClarification] (not an exception) when the backend asks
+   * one concise clarifying question instead of guessing a family. Any other backend rejection
+   * (routing_unavailable, a session-state conflict, project_not_found, etc.) propagates as a
+   * [ProjectApiException] - callers show a retryable error and never silently pick another family.
+   */
+  suspend fun getProjectGuidance(
+      projectId: String,
+      userRequest: String,
+      investigationSessionId: String?,
+      idempotencyKey: String,
+  ): ProjectGuidanceOutcome
 }
 
 internal class ProjectApiException(val code: Int, val category: String, override val message: String) :
@@ -167,6 +224,14 @@ internal class HttpUrlProjectApi(
       investigationLoadError = listOfNotNull(investigationLoadError, exc.message).joinToString("; ")
     }
 
+    // Best-effort, same as the investigation fetch above: a failure here must not fail the whole
+    // Overview - it only means the HUD/Project Detail show no Explore-plan content this refresh.
+    val latestExplorePlan = try {
+      loadLatestExplorePlanSummary(normalizedProjectId, pendingProposals)
+    } catch (_: ProjectApiException) {
+      null
+    }
+
     return ProjectOverview(
         project = summary,
         revision = revision,
@@ -175,6 +240,44 @@ internal class HttpUrlProjectApi(
         latestInvestigation = investigation,
         pendingProposals = pendingProposals,
         investigationLoadError = investigationLoadError,
+        latestExplorePlan = latestExplorePlan,
+    )
+  }
+
+  /**
+   * Bounded HUD-relevant EXPLORE_PLAN summary for the Project Overview, reusing the backend's
+   * existing GET /interactions/explore read projection (the same one the legacy Ideas panel
+   * already calls) rather than requiring a caller-known result_id. No new backend contract.
+   */
+  private fun loadLatestExplorePlanSummary(
+      normalizedProjectId: String,
+      pendingProposals: List<CheckpointProposalReview>,
+  ): ExplorePlanOverviewSummary? {
+    val projection = executeJsonObject(path = "/projects/$normalizedProjectId/interactions/explore")
+    val groups = projection.optJSONArray("option_sets") ?: JSONArray()
+    if (groups.length() == 0) return null
+    // Backend returns option_sets oldest-first; the most recently completed interaction is last.
+    val latestGroup = groups.getJSONObject(groups.length() - 1)
+    val resultId = latestGroup.getString("interaction_id")
+    val recommendedOrdinal = latestGroup.optNullableInt("recommended_ordinal")
+    val optionsJson = latestGroup.optJSONArray("options") ?: JSONArray()
+    val recommendedTitle = (0 until optionsJson.length())
+        .map { optionsJson.getJSONObject(it) }
+        .firstOrNull { it.optInt("ordinal", -1) == recommendedOrdinal }
+        ?.optJSONObject("idea")?.optNullableString("summary")
+
+    val preferred = projection.optJSONObject("preferred_direction")
+    val preferredIdea = preferred?.optJSONObject("idea")
+    val selectedTitle = preferredIdea?.optNullableString("summary")
+    val selectedIdeaId = preferredIdea?.optNullableString("activity_id")
+    val hasPendingSelectionProposal = selectedIdeaId != null && pendingProposals.any { proposal ->
+      proposal.status == "pending" && selectedIdeaId in proposal.sourceActivityIds
+    }
+    return ExplorePlanOverviewSummary(
+        resultId = resultId,
+        recommendedOptionTitle = recommendedTitle,
+        selectedOptionTitle = selectedTitle,
+        hasPendingSelectionProposal = hasPendingSelectionProposal,
     )
   }
 
@@ -233,6 +336,92 @@ internal class HttpUrlProjectApi(
         modelCallCount = response.optInt("model_call_count", 1),
     )
   }
+
+  override suspend fun getProjectConversation(projectId: String): ProjectConversation {
+    val normalizedProjectId = normalizeId(projectId)
+    return executeJsonObject(path = "/projects/$normalizedProjectId/conversation")
+        .toProjectConversation(normalizedProjectId)
+  }
+
+  override suspend fun sendProjectConversationMessage(
+      projectId: String,
+      text: String,
+      evidenceRefs: List<ConversationEvidenceReference>,
+      idempotencyKey: String,
+  ): ConversationSendResult {
+    val normalizedProjectId = normalizeId(projectId)
+    val body = JSONObject().apply {
+      put("text", text)
+      put("idempotency_key", idempotencyKey)
+      put("evidence_refs", JSONArray().apply {
+        evidenceRefs.forEach { reference ->
+          put(JSONObject().apply {
+            put("type", "PROJECT_RESOURCE_REFERENCE")
+            put("resource_kind", "EVIDENCE")
+            put("resource_id", normalizeId(reference.evidenceId))
+            put("relationship", "ATTACHED")
+            put("container_kind", "INVESTIGATION_SESSION")
+            put("container_id", normalizeId(reference.investigationSessionId))
+          })
+        }
+      })
+    }
+    val response = executeJsonObject(
+        path = "/projects/$normalizedProjectId/conversation/messages",
+        method = "POST",
+        body = body.toString(),
+        readTimeoutMillis = 60_000,
+    )
+    if (response.getString("project_id") != normalizedProjectId) {
+      throw ProjectApiException(200, "project_mismatch", "Backend returned conversation for a different Project.")
+    }
+    return ConversationSendResult(
+        conversationId = response.getString("conversation_id"),
+        projectId = normalizedProjectId,
+        turns = response.getJSONArray("turns").toConversationTurns(normalizedProjectId),
+        reconstructed = response.optBoolean("reconstructed", false),
+    )
+  }
+
+  private fun JSONObject.toProjectConversation(expectedProjectId: String): ProjectConversation {
+    val returnedProjectId = getString("project_id")
+    if (returnedProjectId != expectedProjectId) {
+      throw ProjectApiException(200, "project_mismatch", "Backend returned conversation for a different Project.")
+    }
+    return ProjectConversation(
+        conversationId = getString("conversation_id"),
+        projectId = returnedProjectId,
+        turns = getJSONArray("turns").toConversationTurns(expectedProjectId),
+    )
+  }
+
+  private fun JSONArray.toConversationTurns(expectedProjectId: String): List<ConversationTurn> =
+      (0 until length()).map { index ->
+        val turn = getJSONObject(index)
+        if (turn.getString("project_id") != expectedProjectId) {
+          throw ProjectApiException(200, "project_mismatch", "Backend returned a turn for a different Project.")
+        }
+        val content = turn.getJSONArray("content_parts")
+        val text = (0 until content.length()).map { content.getJSONObject(it) }
+            .firstOrNull { it.getString("type") == "TEXT" }?.getString("text")
+            ?: throw ProjectApiException(200, "invalid_response", "Conversation turn has no text.")
+        val refs = (0 until content.length()).map { content.getJSONObject(it) }
+            .filter { it.getString("type") == "PROJECT_RESOURCE_REFERENCE" }
+            .map { part -> ConversationEvidenceReference(
+                evidenceId = part.getString("resource_id"),
+                investigationSessionId = part.getString("container_id"),
+            ) }
+        ConversationTurn(
+            turnId = turn.getString("turn_id"),
+            projectId = expectedProjectId,
+            sequenceNumber = turn.getInt("sequence_number"),
+            role = ConversationRole.valueOf(turn.getString("role")),
+            status = ConversationTurnStatus.valueOf(turn.getString("status")),
+            text = text,
+            evidenceRefs = refs,
+            idempotencyKey = turn.getString("idempotency_key"),
+        )
+      }.sortedBy { it.sequenceNumber }
 
   override suspend fun previewProjectProgress(
       projectId: String,
@@ -333,15 +522,224 @@ internal class HttpUrlProjectApi(
     executeJsonObject(path = "/projects/${normalizeId(projectId)}/checkpoint-proposals/${normalizeId(proposalId)}/reject", method = "POST")
   }
 
+  override suspend fun createExplorePlan(projectId: String, userIntent: String, idempotencyKey: String): ExplorePlanCreateResult {
+    val normalizedProjectId = normalizeId(projectId)
+    val body = JSONObject().apply {
+      put("user_intent", userIntent)
+      put("input_refs", JSONArray())
+      put("idempotency_key", idempotencyKey)
+    }
+    return try {
+      val response = executeJsonObject(
+          path = "/projects/$normalizedProjectId/ai-results/explore-plan",
+          method = "POST",
+          body = body.toString(),
+      )
+      if (response.getString("project_id") != normalizedProjectId) {
+        throw ProjectApiException(200, "project_mismatch", "Backend returned an Explore plan for a different Project.")
+      }
+      ExplorePlanCreateResult.Ready(response.toExplorePlanResult())
+    } catch (exc: ProjectApiException) {
+      if (exc.category == "explore_plan_needs_more_information") {
+        ExplorePlanCreateResult.InformationRequest(
+            exc.message.ifBlank { "More information is needed before design ideas can be created." },
+        )
+      } else {
+        throw exc
+      }
+    }
+  }
+
+  override suspend fun getExplorePlan(projectId: String, resultId: String): ExplorePlanResult {
+    val normalizedProjectId = normalizeId(projectId)
+    val response = executeJsonObject(
+        path = "/projects/$normalizedProjectId/ai-results/explore-plan/${normalizeId(resultId)}",
+    )
+    if (response.getString("project_id") != normalizedProjectId) {
+      throw ProjectApiException(200, "project_mismatch", "Backend returned an Explore plan for a different Project.")
+    }
+    return response.toExplorePlanResult()
+  }
+
+  override suspend fun selectExplorePlanOption(projectId: String, ideaId: String, idempotencyKey: String): ExplorePlanSelection {
+    val normalizedProjectId = normalizeId(projectId)
+    val body = JSONObject().apply {
+      put("disposition", "select")
+      put("idempotency_key", idempotencyKey)
+    }
+    val response = executeJsonObject(
+        path = "/projects/$normalizedProjectId/ideas/${normalizeId(ideaId)}/disposition",
+        method = "POST",
+        body = body.toString(),
+    )
+    val idea = response.getJSONObject("idea")
+    if (idea.optNullableString("project_id") != normalizedProjectId) {
+      throw ProjectApiException(200, "project_mismatch", "Backend returned a selection for a different Project.")
+    }
+    val proposalJson = response.optJSONObject("checkpoint_proposal")
+    if (proposalJson != null && proposalJson.optNullableString("project_id") != normalizedProjectId) {
+      throw ProjectApiException(200, "project_mismatch", "Backend returned a Project change for a different Project.")
+    }
+    return ExplorePlanSelection(
+        selectedIdeaId = idea.getString("activity_id"),
+        checkpointProposal = proposalJson?.toCheckpointProposalReview(),
+    )
+  }
+
+  override suspend fun getProjectGuidance(
+      projectId: String,
+      userRequest: String,
+      investigationSessionId: String?,
+      idempotencyKey: String,
+  ): ProjectGuidanceOutcome {
+    val normalizedProjectId = normalizeId(projectId)
+    val body = JSONObject().apply {
+      put("user_request", userRequest)
+      investigationSessionId?.let { put("investigation_session_id", normalizeId(it)) }
+      put("idempotency_key", idempotencyKey)
+    }
+    return try {
+      val response = executeJsonObject(
+          path = "/projects/$normalizedProjectId/ai-results",
+          method = "POST",
+          body = body.toString(),
+          readTimeoutMillis = 30_000,
+      )
+      if (response.getString("project_id") != normalizedProjectId) {
+        throw ProjectApiException(200, "project_mismatch", "Backend returned guidance for a different Project.")
+      }
+      ProjectGuidanceOutcome.Ready(response.toProjectGuidanceResult())
+    } catch (exc: ProjectApiException) {
+      if (exc.category == "routing_needs_clarification") {
+        ProjectGuidanceOutcome.NeedsClarification(exc.message.ifBlank { "Could you share a bit more detail?" })
+      } else {
+        throw exc
+      }
+    }
+  }
+
+  override suspend fun createVisualArtifact(projectId: String, resultId: String, optionId: String, idempotencyKey: String): VisualArtifact {
+    val path = visualArtifactBase(projectId, resultId, optionId)
+    val body = JSONObject().put("idempotency_key", idempotencyKey).toString()
+    return executeJsonObject(path, "POST", body, readTimeoutMillis = 30_000).toVisualArtifact()
+  }
+
+  override suspend fun getVisualArtifact(projectId: String, resultId: String, optionId: String, artifactId: String): VisualArtifact =
+      executeJsonObject("${visualArtifactBase(projectId, resultId, optionId)}/${normalizeId(artifactId)}").toVisualArtifact()
+
+  override suspend fun retryVisualArtifact(projectId: String, resultId: String, optionId: String, artifactId: String, idempotencyKey: String): VisualArtifact {
+    val body = JSONObject().put("idempotency_key", idempotencyKey).toString()
+    return executeJsonObject(
+        "${visualArtifactBase(projectId, resultId, optionId)}/${normalizeId(artifactId)}/retry",
+        "POST", body, readTimeoutMillis = 60_000,
+    ).toVisualArtifact()
+  }
+
+  override suspend fun getVisualArtifactImages(projectId: String, resultId: String, optionId: String, artifactId: String): VisualArtifactImages {
+    val base = "${visualArtifactBase(projectId, resultId, optionId)}/${normalizeId(artifactId)}"
+    return VisualArtifactImages(source = executeBytes("$base/source"), visualization = executeBytes("$base/content"))
+  }
+
+  private fun visualArtifactBase(projectId: String, resultId: String, optionId: String): String =
+      "/projects/${normalizeId(projectId)}/ai-results/explore-plan/${normalizeId(resultId)}/options/${normalizeId(optionId)}/visual-artifacts"
+
+  private fun JSONObject.toVisualArtifact() = VisualArtifact(
+      artifactId = getString("artifact_id"),
+      projectId = getString("project_id"),
+      resultId = getString("project_ai_result_id"),
+      optionId = getString("option_id"),
+      status = VisualArtifactStatus.valueOf(getString("status")),
+      sourceEvidenceIds = optJSONArray("source_evidence_ids").toStringList(),
+      retention = getString("retention"),
+      failureCategory = optNullableString("failure_category"),
+  )
+
+  private fun JSONObject.toProjectGuidanceResult(): ProjectGuidanceResult {
+    return when (val resultType = getString("result_type")) {
+      "EXPLORE_PLAN" -> ProjectGuidanceResult.ExplorePlan(toExplorePlanResult())
+      "GENERAL_GUIDANCE" -> {
+        val guidance = getJSONObject("general_guidance")
+        ProjectGuidanceResult.GeneralGuidance(
+            answer = guidance.getString("answer"),
+            uncertain = guidance.optBoolean("insufficient_context", false),
+        )
+      }
+      "TROUBLESHOOT" -> {
+        val evidenceBacked = optJSONObject("troubleshoot")
+        if (evidenceBacked != null) {
+          ProjectGuidanceResult.TroubleshootEvidence(resultId = getString("result_id"))
+        } else {
+          val text = getJSONObject("troubleshoot_text")
+          ProjectGuidanceResult.TroubleshootText(
+              diagnosis = text.getString("diagnosis"),
+              recommendedNextAction = text.getString("recommended_next_action"),
+              uncertain = text.optBoolean("uncertain", false),
+          )
+        }
+      }
+      else -> throw ProjectApiException(200, "invalid_response", "Backend returned an unsupported guidance result type: $resultType.")
+    }
+  }
+
+  private fun JSONObject.toExplorePlanResult(): ExplorePlanResult {
+    val hud = getJSONObject("hud_projection")
+    val group = getJSONObject("explore_plan")
+    val optionsJson = group.optJSONArray("options") ?: JSONArray()
+    val options = (0 until optionsJson.length()).map { index -> optionsJson.getJSONObject(index).toExplorePlanOption() }
+    return ExplorePlanResult(
+        projectId = getString("project_id"),
+        resultId = getString("result_id"),
+        complete = group.optBoolean("complete", false),
+        title = group.optNullableString("title"),
+        summary = group.optNullableString("summary"),
+        hudHeadline = hud.getString("headline"),
+        hudNext = hud.optNullableString("next"),
+        hudUncertain = hud.optBoolean("uncertainty_flag", false),
+        observations = group.optJSONArray("observations").toStringList(),
+        recommendedOrdinal = group.optNullableInt("recommended_ordinal"),
+        recommendationReason = group.optNullableString("recommendation_reason"),
+        nextSteps = group.optJSONArray("next_steps").toStringList(),
+        followUpQuestions = group.optJSONArray("follow_up_questions").toStringList(),
+        options = options,
+    )
+  }
+
+  private fun JSONObject.toExplorePlanOption(): ExplorePlanOption {
+    val idea = getJSONObject("idea")
+    val cost = optJSONObject("estimated_cost")?.let {
+      ExplorePlanEstimatedCost(
+          currency = it.getString("currency"),
+          minAmount = it.optNullableDouble("min_amount"),
+          maxAmount = it.optNullableDouble("max_amount"),
+          qualifier = it.optNullableString("qualifier"),
+      )
+    }
+    return ExplorePlanOption(
+        ideaId = idea.getString("activity_id"),
+        ordinal = getInt("ordinal"),
+        title = idea.getString("summary"),
+        summary = getString("summary"),
+        rationale = optNullableString("rationale"),
+        tradeoffs = optNullableString("tradeoffs"),
+        concept = optNullableString("concept"),
+        proposedChanges = optNullableString("proposed_changes"),
+        estimatedCost = cost,
+        recommended = optBoolean("recommended", false),
+        disposition = optNullableString("disposition"),
+    )
+  }
+
   private fun JSONObject.toCheckpointProposalReview(): CheckpointProposalReview {
     val patch = getJSONObject("proposed_checkpoint_patch")
     val fields = patch.keys().asSequence().associateWith { key -> patch.optNullableString(key) }
+    val sourceIds = optJSONArray("source_activity_ids")
     return CheckpointProposalReview(
         proposalId = getString("proposal_id"),
         projectId = getString("project_id"),
         status = getString("status"),
         reason = getString("reason"),
         proposedFields = fields,
+        sourceActivityIds = sourceIds.toStringList(),
     )
   }
 
@@ -421,8 +819,28 @@ internal class HttpUrlProjectApi(
     return value.ifBlank { null }
   }
 
-  private fun executeJsonObject(path: String, method: String = "GET", body: String? = null): JSONObject {
-    val connection = openConnection(path, method = method, body = body)
+  private fun JSONObject.optNullableInt(key: String): Int? {
+    if (isNull(key) || !has(key)) return null
+    return optInt(key)
+  }
+
+  private fun JSONObject.optNullableDouble(key: String): Double? {
+    if (isNull(key) || !has(key)) return null
+    return optDouble(key)
+  }
+
+  private fun JSONArray?.toStringList(): List<String> {
+    if (this == null) return emptyList()
+    return (0 until length()).map { index -> getString(index) }
+  }
+
+  private fun executeJsonObject(
+      path: String,
+      method: String = "GET",
+      body: String? = null,
+      readTimeoutMillis: Int = 15_000,
+  ): JSONObject {
+    val connection = openConnection(path, method = method, body = body, readTimeoutMillis = readTimeoutMillis)
     return connection.useJsonResponse { responseBody -> JSONObject(responseBody) }
   }
 
@@ -453,12 +871,17 @@ internal class HttpUrlProjectApi(
     }
   }
 
-  private fun openConnection(path: String, method: String = "GET", body: String? = null): HttpURLConnection {
+  private fun openConnection(
+      path: String,
+      method: String = "GET",
+      body: String? = null,
+      readTimeoutMillis: Int = 15_000,
+  ): HttpURLConnection {
     val url = URL("${baseUrl.trimEnd('/')}$path")
     return connectionFactory(url).apply {
       requestMethod = method
       connectTimeout = 15_000
-      readTimeout = 15_000
+      readTimeout = readTimeoutMillis
       doInput = true
       useCaches = false
       if (body != null) {

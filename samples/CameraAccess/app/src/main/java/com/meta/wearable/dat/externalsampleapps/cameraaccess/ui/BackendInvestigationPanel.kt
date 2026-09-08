@@ -52,6 +52,24 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.bitma
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.deriveInvestigationProductState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.liveCaptureFilename
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.reduceInvestigationSpeechState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectGuidanceResult
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectGuidanceUiState
+
+/**
+ * ADR-060: the SOLE natural guidance action for this panel's phone usage (ContinueInvestigationSection) -
+ * replaces both the old direct "Analyze investigation" trigger and the old explicit "Or explore
+ * design/planning ideas instead" alternative-family button. [onGetGuidance] takes no arguments -
+ * the caller's closure already captures whatever request text/session id it needs (this panel's
+ * own [InvestigationSessionDebugViewModel]-owned `explanationText` field remains the single typed
+ * request surface - never a second, parallel text field). Null (the default, e.g. StreamScreen's
+ * live-capture usage) hides Get Guidance entirely and leaves this panel's original Analyze
+ * behavior completely untouched - that surface still exists solely for the HUD-triggered Analyze
+ * trigger, which remains TROUBLESHOOT-only for V1 and is unaffected either way.
+ */
+internal data class ProjectGuidanceComposerState(
+    val uiState: ProjectGuidanceUiState,
+    val onGetGuidance: () -> Unit,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -63,6 +81,7 @@ internal fun BackendInvestigationPanel(
   onReturnToProject: (() -> Unit)? = null,
   onCaptureAnotherView: (() -> Unit)? = null,
   onPrefillApplied: (() -> Unit)? = null,
+  guidance: ProjectGuidanceComposerState? = null,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val productState = remember(uiState) { deriveInvestigationProductState(uiState) }
@@ -274,27 +293,109 @@ internal fun BackendInvestigationPanel(
         )
       }
 
-      Button(
-          onClick = viewModel::onStartInvestigationButtonClick,
-          modifier = Modifier.fillMaxWidth(),
-          enabled = productState.canAnalyze && !uiState.isRunning,
-      ) {
-        Text(
-            when {
-              uiState.isRunning -> "Analyzing..."
-              productState.phase == InvestigationProductPhase.FAILED && productState.canAnalyze ->
-                  "Retry analysis"
-              else -> "Analyze investigation"
+      if (guidance != null) {
+        // ADR-060: ONE natural action - the backend's Response Planner decides TROUBLESHOOT vs.
+        // EXPLORE_PLAN vs. GENERAL_GUIDANCE from this same typed request; this panel never offers
+        // a family choice. Works with zero captured evidence (guidance requires only non-blank
+        // explanationText, unlike the old canAnalyze-gated Analyze action below).
+        val guidanceState = guidance.uiState
+        if (guidanceState is ProjectGuidanceUiState.ClarificationNeeded) {
+          Text(
+              text = guidanceState.question,
+              style = MaterialTheme.typography.bodyMedium,
+              fontWeight = FontWeight.SemiBold,
+              color = MaterialTheme.colorScheme.primary,
+          )
+        }
+        Button(
+            onClick = guidance.onGetGuidance,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = uiState.explanationText.isNotBlank() && guidanceState !is ProjectGuidanceUiState.Requesting,
+        ) {
+          Text(
+              when (guidanceState) {
+                is ProjectGuidanceUiState.Requesting -> "Getting guidance..."
+                is ProjectGuidanceUiState.Failed -> "Retry"
+                else -> "Get guidance"
+              }
+          )
+        }
+        if (uiState.explanationText.isBlank() && guidanceState !is ProjectGuidanceUiState.Requesting) {
+          Text(
+              text = "Describe what's going on or what you'd like help with.",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+        if (guidanceState is ProjectGuidanceUiState.Requesting) {
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+            Text("Getting guidance...", style = MaterialTheme.typography.bodyMedium)
+          }
+        }
+        if (guidanceState is ProjectGuidanceUiState.Failed) {
+          Text(
+              text = guidanceState.message,
+              style = MaterialTheme.typography.bodyMedium,
+              color = Color(0xFFAA071E),
+          )
+        }
+        if (guidanceState is ProjectGuidanceUiState.Ready) {
+          when (val result = guidanceState.result) {
+            is ProjectGuidanceResult.TroubleshootText -> {
+              HorizontalDivider()
+              Text("Diagnosis — unconfirmed", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+              if (result.uncertain) {
+                Text(
+                    text = "This is a general best guess - more detail or a photo would help confirm it.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+              }
+              Text(result.diagnosis, style = MaterialTheme.typography.bodyLarge)
+              Text("Suggested next step", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+              Text(result.recommendedNextAction, style = MaterialTheme.typography.bodyLarge)
             }
-        )
-      }
+            is ProjectGuidanceResult.GeneralGuidance -> {
+              HorizontalDivider()
+              Text(result.answer, style = MaterialTheme.typography.bodyLarge)
+              if (result.uncertain) {
+                Text(
+                    text = "There wasn't enough context to answer this fully.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+              }
+            }
+            // ExplorePlan/TroubleshootEvidence are handled by the caller (ContinueInvestigationSection):
+            // it switches this sheet to the existing ExplorePlanPanel, or dismisses and reloads so
+            // the existing Investigation trust UI picks up the result - neither is rendered here.
+            else -> Unit
+          }
+        }
+      } else {
+        Button(
+            onClick = viewModel::onStartInvestigationButtonClick,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = productState.canAnalyze && !uiState.isRunning,
+        ) {
+          Text(
+              when {
+                uiState.isRunning -> "Analyzing..."
+                productState.phase == InvestigationProductPhase.FAILED && productState.canAnalyze ->
+                    "Retry analysis"
+                else -> "Analyze investigation"
+              }
+          )
+        }
 
-      if (!productState.canAnalyze && !uiState.isRunning) {
-        Text(
-            text = "Add at least 1 view and explanation to analyze.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (!productState.canAnalyze && !uiState.isRunning) {
+          Text(
+              text = "Add at least 1 view and explanation to analyze.",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
       }
 
       if (uiState.isRunning) {

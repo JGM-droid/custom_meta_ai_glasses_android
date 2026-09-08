@@ -13,6 +13,7 @@
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
 
+import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.background
@@ -70,6 +71,21 @@ import kotlinx.coroutines.launch
 
 private val UpdateRequiredBackground = Color(0xFFFFF4D6)
 private val UpdateRequiredForeground = Color(0xFF8A4B00)
+
+/**
+ * Relaunches this app's own launcher Activity in a fresh task, then kills this process. The DAT
+ * SDK's singleton (Wearables) and the AutoDeviceSelector built from it are process-lifetime state
+ * with no smaller in-app reset available (Wearables.initialize() is a no-op after the first call
+ * per process - see the call site's doc) - a full process restart is the smallest change that
+ * reproduces the exact recovery already verified by hand (force-stop + relaunch, no
+ * re-registration required).
+ */
+private fun restartApp(context: android.content.Context) {
+  val relaunchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return
+  relaunchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+  context.startActivity(relaunchIntent)
+  Runtime.getRuntime().exit(0)
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -170,6 +186,26 @@ fun NonStreamScreen(
                 color = Color.White.copy(alpha = 0.7f),
             )
           }
+          // Root cause (proven via device logs): the DAT SDK's device selector only performs
+          // fresh discovery/link-establishment during Wearables.initialize() - a call that is a
+          // no-op on every subsequent invocation within the same process (confirmed by the SDK's
+          // own "Wearables SDK already initialized" log). A real BLE link loss after a stream
+          // session (device-initiated disconnect, or backgrounding mid-stream) is therefore
+          // terminal for hasActiveDevice for the rest of this process's lifetime, even though the
+          // glasses are still physically reachable - verified by a full app relaunch (no
+          // re-registration needed) immediately restoring hasActiveDevice. This button offers that
+          // exact, already-proven recovery in-app instead of requiring the user to force-stop the
+          // app manually.
+          Text(
+              text = stringResource(R.string.reconnect_glasses_hint),
+              style = MaterialTheme.typography.bodySmall,
+              color = Color.White.copy(alpha = 0.6f),
+              textAlign = TextAlign.Center,
+          )
+          SwitchButton(
+              label = stringResource(R.string.restart_app_button_title),
+              onClick = { restartApp(context) },
+          )
         }
 
         if (isUpdateRequired) {

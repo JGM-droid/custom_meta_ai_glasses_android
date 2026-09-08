@@ -4,6 +4,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.time.Duration
 import java.time.Instant
 
@@ -74,6 +75,11 @@ internal data class InvestigationSubmissionProgress(
     val message: String? = null,
 )
 
+internal data class StagedConversationEvidence(
+    val session: BackendSessionDto,
+    val evidence: List<BackendEvidenceDto>,
+)
+
 internal sealed class InvestigationSubmissionOutcome {
   data class Completed(
       val session: BackendSessionDto,
@@ -125,6 +131,50 @@ internal class InvestigationSessionRepository(
         sessionId = sessionId,
         request = BackendTrustDecisionRequestDto(decision = decision, correction = correction),
     )
+  }
+
+  /**
+   * ADR-060 multimodal bridge: create-or-reuse a Project-scoped Investigation session and upload
+   * [draft]'s evidence in order, WITHOUT calling analyze - the exact first half of
+   * [submitInvestigation] below, extracted so Get Guidance can make accepted pending evidence
+   * backend-available before the single unified reasoning call, never as a second reasoning
+   * operation. [draft.evidence] may be empty (reusing an existing session's already-staged
+   * evidence with nothing new to add this round) - unlike [submitInvestigation], this never
+   * requires at least one image or a non-empty explanation, since staging's caller already
+   * decided evidence exists or a session already exists before calling this at all.
+   *
+   * Uploading the SAME image bytes again (e.g. an unmodified retry) is safe and free of
+   * duplicates: the backend's evidence store dedupes by content hash and returns the existing
+   * record instead of creating a second one (see investigations/evidence_store.py's
+   * upload_evidence) - this function relies on that guarantee rather than tracking "already
+   * uploaded" state itself.
+   *
+   * Shares [submissionMutex] with [submitInvestigation] so a HUD-triggered full submit and a
+   * phone-triggered staging call for the same session can never interleave their uploads.
+   */
+  suspend fun stageEvidence(draft: InvestigationSubmissionDraft): BackendSessionDto {
+    return stageEvidenceForConversation(draft).session
+  }
+
+  /** Same bounded, deduplicating staging path, returning canonical IDs needed by conversation. */
+  suspend fun stageEvidenceForConversation(draft: InvestigationSubmissionDraft): StagedConversationEvidence {
+    if (draft.evidence.size > InvestigationCaptureSlots.MAX_CAPTURE_SLOTS) {
+      throw IllegalArgumentException("At most five images are allowed.")
+    }
+    if (draft.evidence.any { it.bytes.isEmpty() }) {
+      throw IllegalArgumentException("Evidence payload cannot be empty.")
+    }
+    return submissionMutex.withLock {
+      val session = draft.continuationSessionId?.let { getSession(it) }
+          ?: createSession(clientMetadata = draft.clientMetadata, projectId = draft.projectId)
+      val explanation = draft.explanationText.trim()
+      val uploaded = draft.evidence.mapIndexed { index, item ->
+        ensureNotCancelled()
+        val explanationForUpload = if (index == 0) explanation.ifBlank { null } else null
+        uploadEvidence(sessionId = session.sessionId, item = item, explanationText = explanationForUpload)
+      }
+      StagedConversationEvidence(session = session, evidence = uploaded)
+    }
   }
 
   suspend fun submitInvestigation(
