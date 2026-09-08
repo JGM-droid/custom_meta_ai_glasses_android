@@ -22,8 +22,13 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.Inves
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.investigationViewModelKey
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationEvidenceReference
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationImageUiState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationRole
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationSendResult
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationTurn
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationTurnStatus
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.MockProjectRepository
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectConversation
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectConversationViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectRepository
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
@@ -138,6 +143,164 @@ class ProjectConversationScreenTest {
     assertEquals(project.projectId, repository.sentProjectId)
     assertEquals(listOf(listOf(reference), emptyList()), repository.sentEvidenceRefs)
     assertEquals(2, repository.sendCount)
+  }
+
+  // --- Phase 3A closeout: persistent conversation image thumbnails/viewer ---
+
+  @Test
+  fun userTurnWithEvidenceReferenceRendersThumbnailAndOpensFullScreenViewerThenReturnsToConversation() {
+    val reference = ConversationEvidenceReference("evidence-thumb-1", "session-thumb-1")
+    val repository = ImageBackedRepository(mapOf(reference.evidenceId to fakePngBytes()))
+    val viewModel = ProjectConversationViewModel(application, project.projectId, repository)
+    setContent(viewModel)
+    compose.waitUntil(10_000) { viewModel.state.value.loadState.name == "READY" }
+
+    viewModel.adoptAcceptedEvidence(reference)
+    viewModel.updateDraft("What do you think of this room?")
+    viewModel.send()
+    compose.waitUntil(10_000) { viewModel.state.value.turns.size == 2 }
+
+    val thumbnailTag = "conversation_evidence_thumbnail_${reference.evidenceId}"
+    compose.waitUntil(10_000) { viewModel.evidenceImages.value.values.any { it is ConversationImageUiState.Ready } }
+    compose.onNodeWithTag(thumbnailTag).assertExists().performClick()
+    compose.onNodeWithTag("conversation_evidence_viewer").assertExists()
+
+    compose.onNodeWithTag("conversation_evidence_viewer_close").performClick()
+    compose.onNodeWithTag("conversation_evidence_viewer").assertDoesNotExist()
+    // Closing the viewer returns to the same, still-intact conversation.
+    compose.onNodeWithTag("conversation_timeline").assertExists()
+    compose.onNodeWithTag(thumbnailTag).assertExists()
+  }
+
+  @Test
+  fun textOnlyTurnRendersWithoutAnyEvidenceThumbnail() {
+    val viewModel = ProjectConversationViewModel(application, project.projectId, MockProjectRepository())
+    setContent(viewModel)
+    compose.waitUntil(10_000) { viewModel.state.value.loadState.name == "READY" }
+
+    viewModel.updateDraft("Just a question, no photo")
+    viewModel.send()
+    compose.waitUntil(10_000) { viewModel.state.value.turns.size == 2 }
+
+    compose.onNodeWithTag("conversation_turn_1_images").assertDoesNotExist()
+    compose.onNodeWithTag("conversation_turn_2_images").assertDoesNotExist()
+  }
+
+  @Test
+  fun turnWithMultipleEvidenceReferencesRendersEachThumbnailDeterministically() {
+    val refA = ConversationEvidenceReference("evidence-multi-a", "session-multi-1")
+    val refB = ConversationEvidenceReference("evidence-multi-b", "session-multi-1")
+    val conversation = ProjectConversation(
+        conversationId = "conversation-multi",
+        projectId = project.projectId,
+        turns = listOf(
+            ConversationTurn(
+                turnId = "turn-multi-user",
+                projectId = project.projectId,
+                sequenceNumber = 1,
+                role = ConversationRole.USER,
+                status = ConversationTurnStatus.COMPLETED,
+                text = "Compare these two",
+                evidenceRefs = listOf(refA, refB),
+                idempotencyKey = "multi-key",
+            ),
+            ConversationTurn(
+                turnId = "turn-multi-assistant",
+                projectId = project.projectId,
+                sequenceNumber = 2,
+                role = ConversationRole.ASSISTANT,
+                status = ConversationTurnStatus.COMPLETED,
+                text = "They look similar.",
+                evidenceRefs = emptyList(),
+                idempotencyKey = "multi-key",
+            ),
+        ),
+    )
+    val repository = PreloadedConversationRepository(
+        conversation, mapOf(refA.evidenceId to fakePngBytes(), refB.evidenceId to fakePngBytes()))
+    val viewModel = ProjectConversationViewModel(application, project.projectId, repository)
+    setContent(viewModel)
+
+    compose.waitUntil(10_000) { viewModel.state.value.turns.size == 2 }
+    compose.onNodeWithTag("conversation_evidence_thumbnail_${refA.evidenceId}").assertExists()
+    compose.onNodeWithTag("conversation_evidence_thumbnail_${refB.evidenceId}").assertExists()
+  }
+
+  /**
+   * The image must come back from persisted turn data alone on a fresh ViewModel/composition -
+   * simulating conversation reload / app relaunch - never from the transient staged reference or
+   * any live-capture state the sending ViewModel happened to hold.
+   */
+  @Test
+  fun reloadedConversationStillRendersEvidenceThumbnailFromPersistedTurnDataAlone() {
+    val reference = ConversationEvidenceReference("evidence-reload-1", "session-reload-1")
+    val repository = ImageBackedRepository(mapOf(reference.evidenceId to fakePngBytes()))
+    val first = ProjectConversationViewModel(application, project.projectId, repository)
+    compose.waitUntil(10_000) { first.state.value.loadState.name == "READY" }
+    first.adoptAcceptedEvidence(reference)
+    first.updateDraft("Persisted photo")
+    first.send()
+    compose.waitUntil(10_000) { first.state.value.turns.size == 2 }
+
+    // A brand-new ViewModel instance with no attach()/adoptAcceptedEvidence() call and no staged
+    // reference of its own - only the persisted turn it reads back via getProjectConversation.
+    val reopened = ProjectConversationViewModel(application, project.projectId, repository)
+    setContent(reopened)
+    compose.waitUntil(10_000) { reopened.state.value.turns.size == 2 }
+    compose.onNodeWithTag("conversation_evidence_thumbnail_${reference.evidenceId}").assertExists()
+  }
+
+  @Test
+  fun evidenceImageLoadFailureShowsFallbackAndLeavesConversationIntact() {
+    val reference = ConversationEvidenceReference("evidence-missing-1", "session-missing-1")
+    val repository = ImageBackedRepository(imagesByEvidenceId = emptyMap())
+    val viewModel = ProjectConversationViewModel(application, project.projectId, repository)
+    setContent(viewModel)
+    compose.waitUntil(10_000) { viewModel.state.value.loadState.name == "READY" }
+
+    viewModel.adoptAcceptedEvidence(reference)
+    viewModel.updateDraft("Broken photo")
+    viewModel.send()
+    compose.waitUntil(10_000) { viewModel.state.value.turns.size == 2 }
+    compose.waitUntil(10_000) { viewModel.evidenceImages.value.values.any { it is ConversationImageUiState.Failed } }
+
+    compose.onNodeWithTag("conversation_evidence_thumbnail_${reference.evidenceId}").assertExists()
+    compose.onNodeWithTag("conversation_timeline").assertExists()
+  }
+
+  private fun fakePngBytes(): ByteArray {
+    val bitmap = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888)
+    val stream = java.io.ByteArrayOutputStream()
+    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
+    return stream.toByteArray()
+  }
+
+  private class ImageBackedRepository(
+      private val imagesByEvidenceId: Map<String, ByteArray>,
+  ) : ProjectRepository by MockProjectRepository() {
+    private val delegate = MockProjectRepository()
+
+    override suspend fun getProjectConversation(projectId: String) = delegate.getProjectConversation(projectId)
+
+    override suspend fun sendProjectConversationMessage(
+        projectId: String,
+        text: String,
+        evidenceRefs: List<ConversationEvidenceReference>,
+        idempotencyKey: String,
+    ) = delegate.sendProjectConversationMessage(projectId, text, evidenceRefs, idempotencyKey)
+
+    override suspend fun getConversationEvidenceImage(projectId: String, reference: ConversationEvidenceReference): ByteArray =
+        imagesByEvidenceId[reference.evidenceId] ?: throw NoSuchElementException("No fake image for ${reference.evidenceId}")
+  }
+
+  private class PreloadedConversationRepository(
+      private val conversation: ProjectConversation,
+      private val imagesByEvidenceId: Map<String, ByteArray>,
+  ) : ProjectRepository by MockProjectRepository() {
+    override suspend fun getProjectConversation(projectId: String) = conversation
+
+    override suspend fun getConversationEvidenceImage(projectId: String, reference: ConversationEvidenceReference): ByteArray =
+        imagesByEvidenceId[reference.evidenceId] ?: throw NoSuchElementException("No fake image for ${reference.evidenceId}")
   }
 
   /**

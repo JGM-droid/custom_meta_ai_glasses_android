@@ -25,6 +25,22 @@ import kotlinx.coroutines.withContext
 
 internal enum class ConversationLoadState { LOADING, READY, ERROR }
 
+/**
+ * Phase 3A closeout: rendering-only cache for Evidence image bytes already resolved via
+ * [ProjectConversationViewModel.loadEvidenceImage] - keyed by the same [ConversationEvidenceReference]
+ * a persisted turn already carries. This is session-lifetime and reconstructible at any time from
+ * the reference; it is never the source of truth for the image (Evidence is) and is never persisted
+ * itself - a fresh process simply re-fetches on first render, same as any other remote thumbnail.
+ */
+internal sealed interface ConversationImageUiState {
+  data object Loading : ConversationImageUiState
+  data class Ready(val bytes: ByteArray) : ConversationImageUiState
+  data class Failed(val message: String) : ConversationImageUiState
+}
+
+internal fun conversationImageCacheKey(reference: ConversationEvidenceReference): String =
+    "${reference.investigationSessionId}:${reference.evidenceId}"
+
 internal data class ConversationAttachmentUiState(
     val uri: String,
     val displayName: String,
@@ -60,6 +76,8 @@ internal class ProjectConversationViewModel(
       },
   ))
   val state: StateFlow<ProjectConversationUiState> = _state.asStateFlow()
+  private val _evidenceImages = MutableStateFlow<Map<String, ConversationImageUiState>>(emptyMap())
+  val evidenceImages: StateFlow<Map<String, ConversationImageUiState>> = _evidenceImages.asStateFlow()
   private var pendingIdempotencyKey: String? = savedState["conversation_pending_key"]
   private var stagedReference: ConversationEvidenceReference? =
       savedState.get<String>("conversation_evidence_id")?.let { evidenceId ->
@@ -175,6 +193,28 @@ internal class ProjectConversationViewModel(
   }
 
   fun retry() = send()
+
+  /**
+   * Resolves a persisted turn's [ConversationEvidenceReference] to its Evidence image bytes, on
+   * demand, for thumbnail/viewer rendering - never triggered by send(), never stored on the turn
+   * itself. Safe to call repeatedly (e.g. on every recomposition/scroll): a Loading or Ready entry
+   * already in the cache short-circuits without a second network call. A prior Failed entry is
+   * retried, since a transient network error shouldn't permanently blank a thumbnail.
+   */
+  fun loadEvidenceImage(reference: ConversationEvidenceReference) {
+    val key = conversationImageCacheKey(reference)
+    val existing = _evidenceImages.value[key]
+    if (existing is ConversationImageUiState.Loading || existing is ConversationImageUiState.Ready) return
+    _evidenceImages.update { it + (key to ConversationImageUiState.Loading) }
+    viewModelScope.launch {
+      try {
+        val bytes = withContext(Dispatchers.IO) { repository.getConversationEvidenceImage(projectId, reference) }
+        _evidenceImages.update { it + (key to ConversationImageUiState.Ready(bytes)) }
+      } catch (error: Exception) {
+        _evidenceImages.update { it + (key to ConversationImageUiState.Failed(safeMessage(error))) }
+      }
+    }
+  }
 
   private suspend fun stageAttachment(attachment: ConversationAttachmentUiState): ConversationEvidenceReference =
       withContext(Dispatchers.IO) {

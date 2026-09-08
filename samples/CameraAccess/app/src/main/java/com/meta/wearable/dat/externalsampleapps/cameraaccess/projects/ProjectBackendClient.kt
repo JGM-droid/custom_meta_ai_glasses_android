@@ -70,6 +70,19 @@ interface ProjectApi {
       idempotencyKey: String,
   ): ConversationSendResult = throw UnsupportedOperationException("Project conversation is unavailable.")
 
+  /**
+   * Phase 3A closeout: reads the raw image bytes for a [ConversationEvidenceReference] already
+   * persisted on a conversation turn - the SAME existing, Project-isolated Evidence content route
+   * the legacy Investigation panel already reads from (GET .../investigation-sessions/{session_id}/
+   * evidence/{evidence_id}/content - see api.py's get_project_investigation_evidence_content).
+   * Conversation only ever stores the reference; this is the one place that resolves it back to
+   * bytes, on demand, never persisted by the conversation itself.
+   */
+  suspend fun getConversationEvidenceImage(
+      projectId: String,
+      reference: ConversationEvidenceReference,
+  ): ByteArray = throw UnsupportedOperationException("Evidence image content is unavailable.")
+
   suspend fun previewProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressPreview
 
   suspend fun saveProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressSaveResult
@@ -382,6 +395,14 @@ internal class HttpUrlProjectApi(
         reconstructed = response.optBoolean("reconstructed", false),
     )
   }
+
+  override suspend fun getConversationEvidenceImage(
+      projectId: String,
+      reference: ConversationEvidenceReference,
+  ): ByteArray = executeBytes(
+      "/projects/${normalizeId(projectId)}/investigation-sessions/" +
+          "${normalizeId(reference.investigationSessionId)}/evidence/${normalizeId(reference.evidenceId)}/content",
+  )
 
   private fun JSONObject.toProjectConversation(expectedProjectId: String): ProjectConversation {
     val returnedProjectId = getString("project_id")

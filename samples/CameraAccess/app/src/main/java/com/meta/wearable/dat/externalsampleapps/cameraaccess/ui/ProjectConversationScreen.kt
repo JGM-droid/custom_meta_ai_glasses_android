@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +29,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.window.Dialog
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -70,11 +73,14 @@ import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.Inves
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.InvestigationSessionDebugViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.investigationViewModelKey
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.investigation.reduceInvestigationSpeechState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationEvidenceReference
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationImageUiState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationLoadState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationRole
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ConversationTurn
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectConversationViewModel
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.ProjectSummary
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.projects.conversationImageCacheKey
 
 private const val TAG = "CameraAccess:ProjectConversation"
 
@@ -98,6 +104,7 @@ internal fun ProjectConversationScreen(
         ::createInvestigationSpeechRecognizerController,
 ) {
   val state by conversationViewModel.state.collectAsState()
+  val evidenceImages by conversationViewModel.evidenceImages.collectAsState()
   val context = LocalContext.current
   val listState = rememberLazyListState()
   var priorCount by remember(project.projectId) { mutableIntStateOf(0) }
@@ -262,7 +269,9 @@ internal fun ProjectConversationScreen(
             Text("Messages and photos stay with this Project.", color = AppColor.InkSecondary, modifier = Modifier.padding(top = 8.dp))
           }
         }
-        items(state.turns, key = ConversationTurn::turnId) { ConversationBubble(it) }
+        items(state.turns, key = ConversationTurn::turnId) { turn ->
+          ConversationBubble(turn, evidenceImages, conversationViewModel::loadEvidenceImage)
+        }
         if (state.sending) item(key = "sending") {
           Row(verticalAlignment = Alignment.CenterVertically) {
             CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = AppColor.Accent)
@@ -275,8 +284,13 @@ internal fun ProjectConversationScreen(
 }
 
 @Composable
-private fun ConversationBubble(turn: ConversationTurn) {
+private fun ConversationBubble(
+    turn: ConversationTurn,
+    evidenceImages: Map<String, ConversationImageUiState>,
+    onLoadEvidenceImage: (ConversationEvidenceReference) -> Unit,
+) {
   val user = turn.role == ConversationRole.USER
+  var viewerReference by remember(turn.turnId) { mutableStateOf<ConversationEvidenceReference?>(null) }
   Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
     Column(
         Modifier.widthIn(max = 340.dp)
@@ -286,11 +300,113 @@ private fun ConversationBubble(turn: ConversationTurn) {
     ) {
       Text(turn.text, color = if (user) AppColor.AccentInk else AppColor.InkPrimary)
       if (turn.evidenceRefs.isNotEmpty()) {
-        Text("📷 ${turn.evidenceRefs.size} photo${if (turn.evidenceRefs.size == 1) "" else "s"}",
-            color = if (user) AppColor.AccentInk else AppColor.InkSecondary,
-            fontSize = 12.sp,
-            modifier = Modifier.padding(top = 8.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(top = 8.dp)
+                .testTag("conversation_turn_${turn.sequenceNumber}_images"),
+        ) {
+          turn.evidenceRefs.forEach { reference ->
+            ConversationEvidenceThumbnail(
+                reference = reference,
+                imageState = evidenceImages[conversationImageCacheKey(reference)],
+                onLoad = onLoadEvidenceImage,
+                onClick = { viewerReference = reference },
+            )
+          }
+        }
       }
+    }
+  }
+  viewerReference?.let { reference ->
+    ConversationEvidenceViewerDialog(
+        imageState = evidenceImages[conversationImageCacheKey(reference)],
+        onDismiss = { viewerReference = null },
+    )
+  }
+}
+
+/** A single Evidence thumbnail: shows a loading spinner, the decoded image, or a fallback icon. */
+@Composable
+private fun ConversationEvidenceThumbnail(
+    reference: ConversationEvidenceReference,
+    imageState: ConversationImageUiState?,
+    onLoad: (ConversationEvidenceReference) -> Unit,
+    onClick: () -> Unit,
+) {
+  LaunchedEffect(reference) { onLoad(reference) }
+  Box(
+      modifier = Modifier.size(88.dp)
+          .clip(RoundedCornerShape(10.dp))
+          .background(Color(0xFF14171B))
+          .let { base -> if (imageState is ConversationImageUiState.Ready) base.clickable(onClick = onClick) else base }
+          .testTag("conversation_evidence_thumbnail_${reference.evidenceId}"),
+      contentAlignment = Alignment.Center,
+  ) {
+    when (imageState) {
+      is ConversationImageUiState.Ready -> {
+        val bitmap = remember(imageState.bytes) {
+          BitmapFactory.decodeByteArray(imageState.bytes, 0, imageState.bytes.size)
+        }
+        if (bitmap != null) {
+          Image(
+              bitmap = bitmap.asImageBitmap(),
+              contentDescription = "Photo",
+              contentScale = ContentScale.Crop,
+              modifier = Modifier.fillMaxSize(),
+          )
+        } else {
+          Icon(Icons.Default.PhotoCamera, contentDescription = "Photo unavailable", tint = AppColor.InkSecondary)
+        }
+      }
+      is ConversationImageUiState.Failed ->
+        Icon(Icons.Default.PhotoCamera, contentDescription = "Photo unavailable", tint = AppColor.InkSecondary)
+      ConversationImageUiState.Loading, null ->
+        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = AppColor.Accent)
+    }
+  }
+}
+
+/** Full-screen viewer for a tapped Evidence thumbnail. Dismissing returns to the same conversation. */
+@Composable
+private fun ConversationEvidenceViewerDialog(
+    imageState: ConversationImageUiState?,
+    onDismiss: () -> Unit,
+) {
+  Dialog(onDismissRequest = onDismiss) {
+    Column(
+        modifier = Modifier.fillMaxSize().background(AppColor.Graphite).padding(20.dp)
+            .testTag("conversation_evidence_viewer"),
+        verticalArrangement = Arrangement.Center,
+    ) {
+      when (imageState) {
+        is ConversationImageUiState.Ready -> {
+          val bitmap = remember(imageState.bytes) {
+            BitmapFactory.decodeByteArray(imageState.bytes, 0, imageState.bytes.size)
+          }
+          if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = "Photo",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(vertical = 12.dp),
+            )
+          } else {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+              Text("Couldn't load this photo.", color = AppColor.InkSecondary)
+            }
+          }
+        }
+        is ConversationImageUiState.Failed -> Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+          Text("Couldn't load this photo.", color = AppColor.InkSecondary)
+        }
+        ConversationImageUiState.Loading, null -> Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+          CircularProgressIndicator(color = AppColor.Accent)
+        }
+      }
+      TextButton(
+          onClick = onDismiss,
+          modifier = Modifier.fillMaxWidth().testTag("conversation_evidence_viewer_close"),
+      ) { Text("Close") }
     }
   }
 }

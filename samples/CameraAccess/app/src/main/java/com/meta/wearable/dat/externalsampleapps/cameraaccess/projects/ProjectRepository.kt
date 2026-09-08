@@ -78,6 +78,18 @@ interface ProjectRepository {
       idempotencyKey: String,
   ): ConversationSendResult = throw UnsupportedOperationException("Project conversation is unavailable in this repository.")
 
+  /**
+   * Phase 3A closeout: resolves a [ConversationEvidenceReference] already persisted on a
+   * conversation turn back to its raw image bytes, via the same Project-isolated Evidence content
+   * route the legacy Investigation panel already reads from. Conversation only ever stores the
+   * reference; this is the on-demand read path back to the canonical Evidence bytes - never a
+   * second image store.
+   */
+  suspend fun getConversationEvidenceImage(
+      projectId: String,
+      reference: ConversationEvidenceReference,
+  ): ByteArray = throw UnsupportedOperationException("Conversation evidence images are unavailable in this repository.")
+
   suspend fun previewProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressPreview
 
   suspend fun saveProjectProgress(projectId: String, request: ProjectProgressRequest): ProjectProgressSaveResult
@@ -148,6 +160,9 @@ class HttpUrlProjectRepository(
       evidenceRefs: List<ConversationEvidenceReference>,
       idempotencyKey: String,
   ) = api.sendProjectConversationMessage(projectId, text, evidenceRefs, idempotencyKey)
+
+  override suspend fun getConversationEvidenceImage(projectId: String, reference: ConversationEvidenceReference) =
+      api.getConversationEvidenceImage(projectId, reference)
 
   override suspend fun previewProjectProgress(projectId: String, request: ProjectProgressRequest) =
       api.previewProjectProgress(projectId, request)
