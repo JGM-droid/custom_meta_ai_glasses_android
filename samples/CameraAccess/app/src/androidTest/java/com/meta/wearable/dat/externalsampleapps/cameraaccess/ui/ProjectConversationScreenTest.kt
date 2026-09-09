@@ -520,7 +520,12 @@ class ProjectConversationScreenTest {
             slotIndex = 0,
             filename = "glasses_capture.png",
             mimeType = "image/png",
-            bytes = byteArrayOf(1, 2, 3),
+            // A real, decodable PNG - this test's LaunchedEffect drives an actual upload through
+            // InvestigationSessionRepository.uploadEvidence, which now (Phase 3C phone-photo-
+            // ingestion fix) decodes bounds/orientation on-device via BitmapFactory/ExifInterface
+            // before deciding whether to pass evidence through unchanged; placeholder junk bytes
+            // would now fail that real decode instead of passing through as before.
+            bytes = validPngBytes(),
             source = InvestigationEvidenceSource.LIVE_GLASSES,
         ),
     )
@@ -595,6 +600,17 @@ class ProjectConversationScreenTest {
         0,
         legacyEvidenceViewModel.uiState.value.activeCaptureCount,
     )
+  }
+
+  /** A minimal, genuinely decodable PNG - unlike a raw junk byte array, this survives the real
+   * on-device BitmapFactory/ExifInterface decode that InvestigationCaptureNormalizer's
+   * normalizeImageEvidenceForBackend now performs on every uploaded evidence item. */
+  private fun validPngBytes(): ByteArray {
+    val bitmap = android.graphics.Bitmap.createBitmap(4, 4, android.graphics.Bitmap.Config.ARGB_8888)
+    val output = java.io.ByteArrayOutputStream()
+    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output)
+    bitmap.recycle()
+    return output.toByteArray()
   }
 
   private fun setContent(viewModel: ProjectConversationViewModel) {

@@ -432,14 +432,19 @@ internal class HttpUrlProjectApi(
                 evidenceId = part.getString("resource_id"),
                 investigationSessionId = part.getString("container_id"),
             ) }
-        // Phase 3B: any other content_part type (e.g. EXPLORE_REFERENCE) stays silently ignored by
-        // this parser, same as before - only VISUAL_ARTIFACT_REFERENCE is understood here.
+        // Phase 3B/3C: any other content_part type stays silently ignored by this parser, same as
+        // before - only VISUAL_ARTIFACT_REFERENCE and INVESTIGATION_REFERENCE are understood here.
         val visualArtifactRef = (0 until content.length()).map { content.getJSONObject(it) }
             .firstOrNull { it.getString("type") == "VISUAL_ARTIFACT_REFERENCE" }
             ?.let { part -> ConversationVisualArtifactReference(
                 projectAiResultId = part.getString("project_ai_result_id"),
                 optionId = part.getString("option_id"),
                 artifactId = part.getString("artifact_id"),
+            ) }
+        val investigationRef = (0 until content.length()).map { content.getJSONObject(it) }
+            .firstOrNull { it.getString("type") == "INVESTIGATION_REFERENCE" }
+            ?.let { part -> ConversationInvestigationReference(
+                investigationSessionId = part.getString("investigation_session_id"),
             ) }
         ConversationTurn(
             turnId = turn.getString("turn_id"),
@@ -451,6 +456,7 @@ internal class HttpUrlProjectApi(
             evidenceRefs = refs,
             idempotencyKey = turn.getString("idempotency_key"),
             visualArtifactRef = visualArtifactRef,
+            investigationRef = investigationRef,
         )
       }.sortedBy { it.sequenceNumber }
 

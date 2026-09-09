@@ -183,6 +183,16 @@ data class ConversationVisualArtifactReference(
     val artifactId: String,
 )
 
+/**
+ * Phase 3C: pointer to a canonical, durable Investigation session/result already referenced from
+ * an assistant turn - the same investigation_session_id the existing Investigation HTTP routes and
+ * trust-decision endpoints already use. Never carries the diagnosis/next-action bodies (those are
+ * already rendered as the turn's own text) or image bytes.
+ */
+data class ConversationInvestigationReference(
+    val investigationSessionId: String,
+)
+
 data class ConversationTurn(
     val turnId: String,
     val projectId: String,
@@ -193,6 +203,7 @@ data class ConversationTurn(
     val evidenceRefs: List<ConversationEvidenceReference>,
     val idempotencyKey: String,
     val visualArtifactRef: ConversationVisualArtifactReference? = null,
+    val investigationRef: ConversationInvestigationReference? = null,
 )
 
 data class ProjectConversation(

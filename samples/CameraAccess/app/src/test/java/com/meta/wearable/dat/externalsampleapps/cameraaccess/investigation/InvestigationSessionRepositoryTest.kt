@@ -16,7 +16,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun rejectsEmptyImagesBeforeNetworking() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome =
         repository.submitInvestigation(
@@ -31,7 +31,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun rejectsSixImagesBeforeNetworking() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
     val draft =
         InvestigationSubmissionDraft(
             evidence = (1..6).map { image("$it.jpg") },
@@ -48,7 +48,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun rejectsBlankExplanationBeforeNetworking() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome =
         repository.submitInvestigation(
@@ -68,7 +68,7 @@ class InvestigationSessionRepositoryTest {
             analyzeResponse = analyzeResponse(status = BackendSessionStatus.ANALYZING, resultAvailable = false),
             pollResponses = mutableListOf(poll(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult())),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome =
         repository.submitInvestigation(
@@ -88,7 +88,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun submitInvestigationForwardsExplicitProjectIdToTheCreateSessionRequest() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(
         InvestigationSubmissionDraft(
@@ -107,7 +107,7 @@ class InvestigationSessionRepositoryTest {
     // navigated in from, so Android must never invent one - the backend's own Active Project
     // fallback / unscoped precedence (ADR-037) is what decides attribution, not this client.
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(
         InvestigationSubmissionDraft(evidence = listOf(image("one.jpg")), explanationText = "Unscoped capture"),
@@ -119,7 +119,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun checkConnectivityForwardsExplicitProjectIdToTheCreateSessionRequest() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.checkConnectivity(projectId = "11111111-1111-1111-1111-111111111111")
 
@@ -129,7 +129,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun checkConnectivityOmitsProjectIdWhenNotProjectScoped() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.checkConnectivity()
 
@@ -143,7 +143,7 @@ class InvestigationSessionRepositoryTest {
             failOnResumeFromCreated = true,
             analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -154,7 +154,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun oneImageInvestigationUploadsExactlyOneImage() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(
         InvestigationSubmissionDraft(
@@ -170,7 +170,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun analysisStartsOnlyAfterEvidenceUploadSucceeds() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(
         InvestigationSubmissionDraft(
@@ -188,7 +188,7 @@ class InvestigationSessionRepositoryTest {
         FakeInvestigationSessionApi(
             createException = BackendApiException(503, BackendApiErrorDto("backend_unreachable", "Backend is unavailable.")),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -204,7 +204,7 @@ class InvestigationSessionRepositoryTest {
         FakeInvestigationSessionApi(
             uploadException = BackendApiException(422, BackendApiErrorDto("upload_rejected", "Image evidence failed validation.")),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -226,7 +226,7 @@ class InvestigationSessionRepositoryTest {
                     poll(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()),
                 ),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "explanation"))
 
@@ -236,7 +236,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun explanationIsSentOnlyThroughSupportedNormalizedTextField() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(
         InvestigationSubmissionDraft(
@@ -251,7 +251,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun explanationIsTrimmedAndSentOnFirstUploadBeforeAnalyze() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(
         InvestigationSubmissionDraft(
@@ -267,7 +267,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun immediateCompletedAnalyzeResponseSkipsPolling() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -282,7 +282,7 @@ class InvestigationSessionRepositoryTest {
             analyzeResponse = analyzeResponse(status = BackendSessionStatus.FINALIZING, resultAvailable = false),
             pollResponses = mutableListOf(poll(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult())),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -301,7 +301,7 @@ class InvestigationSessionRepositoryTest {
                     poll(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult(), pollAfterMs = 30000),
                 ),
         )
-    val repository = InvestigationSessionRepository(api = api, pollDelay = { delays += it })
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api, pollDelay = { delays += it })
 
     repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -315,7 +315,7 @@ class InvestigationSessionRepositoryTest {
             analyzeResponse = analyzeResponse(status = BackendSessionStatus.ANALYZING, resultAvailable = false),
             pollResponses = mutableListOf(poll(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult())),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -331,7 +331,7 @@ class InvestigationSessionRepositoryTest {
         FakeInvestigationSessionApi(
             analyzeException = BackendApiException(500, BackendApiErrorDto("provider_failure", "Analysis provider is unavailable.")),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -346,7 +346,7 @@ class InvestigationSessionRepositoryTest {
         FakeInvestigationSessionApi(
             analyzeException = BackendApiException(422, BackendApiErrorDto("missing_explanation", "A non-empty normalized explanation is required before analysis.")),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "has explanation"))
 
@@ -359,7 +359,7 @@ class InvestigationSessionRepositoryTest {
         FakeInvestigationSessionApi(
             analyzeException = BackendApiException(409, BackendApiErrorDto("analysis_attempt_conflict", "Session analysis is already in progress.")),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -371,7 +371,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun completedAnalyzeResponseBehavesIdempotentlyWithoutSecondAnalyze() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -383,7 +383,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun missingEvidenceErrorIsMapped() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeException = BackendApiException(422, BackendApiErrorDto("insufficient_evidence", "At least one accepted image is required.")))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -395,7 +395,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun missingExplanationErrorIsMapped() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeException = BackendApiException(422, BackendApiErrorDto("missing_explanation", "A non-empty normalized explanation is required before analysis.")))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "has explanation"))
 
@@ -407,7 +407,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun transportFailureIsMapped() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeException = IOException("socket closed"))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -422,7 +422,7 @@ class InvestigationSessionRepositoryTest {
             analyzeResponse = analyzeResponse(status = BackendSessionStatus.ANALYZING, resultAvailable = false),
             pollResponses = MutableList(10) { poll(status = BackendSessionStatus.ANALYZING, resultAvailable = false, pollAfterMs = 1000) },
         )
-    val repository = InvestigationSessionRepository(api = api, pollDelay = { delay(200) })
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api, pollDelay = { delay(200) })
 
     val job = async { repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done")) }
     delay(50)
@@ -447,6 +447,7 @@ class InvestigationSessionRepositoryTest {
     val repository =
       InvestigationSessionRepository(
         api = api,
+        normalizeImageEvidence = { it },
         pollDelay = { },
         maxPollAttempts = 1,
         maxPollingDurationMs = 60_000,
@@ -461,7 +462,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun duplicateSubmissionIsPrevented() = runBlocking {
     val api = FakeInvestigationSessionApi(delayOnUploadMs = 50)
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
     val draft = InvestigationSubmissionDraft(evidence = listOf(image("first.jpg")), explanationText = "test")
 
     val first = async { repository.submitInvestigation(draft) }
@@ -476,7 +477,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun preservesImageOrderDuringUpload() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(
         InvestigationSubmissionDraft(
@@ -491,7 +492,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun jpegEvidenceRemainsValid() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(
         InvestigationSubmissionDraft(
@@ -507,7 +508,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun pngEvidenceRemainsValid() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(
         InvestigationSubmissionDraft(
@@ -604,7 +605,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun liveGlassesCaptureMetadataIsPreservedOnUpload() = runBlocking {
     val api = FakeInvestigationSessionApi(analyzeResponse = analyzeResponse(status = BackendSessionStatus.COMPLETED, resultAvailable = true, compact = compactResult()))
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     repository.submitInvestigation(
         InvestigationSubmissionDraft(
@@ -635,7 +636,7 @@ class InvestigationSessionRepositoryTest {
             analyzeResponse = analyzeResponse(status = BackendSessionStatus.FAILED, resultAvailable = false, retryable = false),
             pollResponses = mutableListOf(),
         )
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(InvestigationSubmissionDraft(listOf(image("one.jpg")), "done"))
 
@@ -646,7 +647,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun moreEvidenceContinuationReusesBackendCreatedSession() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api, pollDelay = {})
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api, pollDelay = {})
 
     val outcome =
         repository.submitInvestigation(
@@ -666,7 +667,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun acceptsFiveImagesAndUploadsThemInOrderBeforeOneAnalyze() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome =
         repository.submitInvestigation(
@@ -684,7 +685,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun retryWithKnownCompletedSessionReconcilesWithoutCreateUploadOrAnalyze() = runBlocking {
     val api = FakeInvestigationSessionApi(initialSessionStatus = BackendSessionStatus.COMPLETED)
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val outcome = repository.submitInvestigation(
         InvestigationSubmissionDraft(
@@ -705,7 +706,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun trustDecisionIsProjectScopedAndUsesExistingApi() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val response =
         repository.submitTrustDecision(
@@ -724,7 +725,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun stageEvidenceCreatesSessionUploadsEvidenceInOrderAndNeverCallsAnalyze() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val session = repository.stageEvidence(
         InvestigationSubmissionDraft(
@@ -750,7 +751,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun conversationStagingReturnsCanonicalSessionAndEvidenceReferenceIds() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val staged = repository.stageEvidenceForConversation(
         InvestigationSubmissionDraft(
@@ -769,7 +770,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun stageEvidenceReusesAnExistingSessionViaContinuationIdInsteadOfCreatingANewOne() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val session = repository.stageEvidence(
         InvestigationSubmissionDraft(
@@ -788,7 +789,7 @@ class InvestigationSessionRepositoryTest {
   @Test
   fun stageEvidenceWithNoNewEvidenceJustReturnsTheReusedSessionAndUploadsNothing() = runBlocking {
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
 
     val session = repository.stageEvidence(
         InvestigationSubmissionDraft(
@@ -812,7 +813,7 @@ class InvestigationSessionRepositoryTest {
     // 9cc0860), not reimplemented here. Android intentionally always re-stages current local
     // evidence rather than tracking "already uploaded" state itself.
     val api = FakeInvestigationSessionApi()
-    val repository = InvestigationSessionRepository(api = api)
+    val repository = InvestigationSessionRepository(normalizeImageEvidence = { it }, api = api)
     val draft = InvestigationSubmissionDraft(
         evidence = listOf(image("photo.jpg")),
         explanationText = "Give me ideas for this room.",
